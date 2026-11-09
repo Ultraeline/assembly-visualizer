@@ -13,7 +13,7 @@ test('real instruction encoding and RIP-relative relocation',()=>{
 test('all normal examples finish with expected values',()=>{
  for(const [id,result] of [['call',12n],['recursive',10n],['disassembly',42n],['rip',42n]]) {
   const sample=examples.find(e=>e.id===id),m=run(machine(sample.code));clean(m);assert.equal(m.regs.rax,result,id);
-  if(id==='rip')assert.equal(m.output,'Hello, StackLens!\n');
+  if(id==='rip')assert.equal(m.output,'你好，可视化汇编运行！\n');
  }
 });
 test('alias writes preserve partial bits, clear upper bits, sign extend',()=>{

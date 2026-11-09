@@ -132,7 +132,7 @@
     }tick();
   }
   function openSettings(){stop();const form=$('settings-form');for(const key of ['codeBase','dataBase','stackTop','stackSize','entry','seed','runtime','pid'])form.elements[key].value=config[key]??defaultConfig[key];form.elements.harness.checked=config.harness!==false;for(const key of ['registers','regions','env','files'])form.elements[key].value=JSON.stringify(config[key]||defaultConfig[key],null,2);form.elements.argv.value=JSON.stringify(config.argv||[config.image?.name||'program']);$('settings-error').textContent='';$('settings-dialog').showModal();}
-  function validateProject(value){if(!value||value.version!==1||typeof value.source!=='string'||value.source.length>1000000)throw new Error('不是有效的 StackLens v1 实验文件');if(value.config&&typeof value.config!=='object')throw new Error('实验设置格式错误');}
+  function validateProject(value){if(!value||value.version!==1||typeof value.source!=='string'||value.source.length>1000000)throw new Error('不是有效的“可视化汇编运行”v1 实验文件');if(value.config&&typeof value.config!=='object')throw new Error('实验设置格式错误');}
   $('examples').innerHTML=examples.map(e=>`<button class="example-button" data-id="${e.id}"><small>${e.tag}</small><strong>${e.title}</strong></button>`).join('');
   $('examples').addEventListener('click',e=>{const b=e.target.closest('[data-id]');if(b)chooseExample(b.dataset.id);});
   $('load-button').addEventListener('click',()=>load());$('reset-button').addEventListener('click',()=>load());$('step-button').addEventListener('click',step);$('run-button').addEventListener('click',start);
@@ -156,7 +156,7 @@
     }catch(err){$('settings-error').textContent=err.message;}
   });
   for(const id of ['help-button','about-button'])$(id).addEventListener('click',()=>{stop(false);$('help-dialog').showModal();});$('help-close').addEventListener('click',()=>$('help-dialog').close());
-  $('export-button').addEventListener('click',()=>{const project={version:1,source:$('source-editor').value,config:currentConfig(),example:activeExample,breakpoints:[...breakpoints]};const url=URL.createObjectURL(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='stacklens-experiment.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notice('已导出实验文件：包括代码、输入、初始状态和断点。重新导入后从起点运行。');});
+  $('export-button').addEventListener('click',()=>{const project={version:1,source:$('source-editor').value,config:currentConfig(),example:activeExample,breakpoints:[...breakpoints]};const url=URL.createObjectURL(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='可视化汇编运行-实验.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notice('已导出实验文件：包括代码、输入、初始状态和断点。重新导入后从起点运行。');});
   $('import-button').addEventListener('click',()=>$('file-input').click());
   $('file-input').addEventListener('change',async e=>{
     const file=e.target.files[0];if(!file)return;stop(false);

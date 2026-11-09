@@ -1,1 +1,1 @@
-{"name":"StackLens 栈镜","short_name":"栈镜","description":"可离线使用的汇编教学模拟器","start_url":"./","scope":"./","display":"standalone","background_color":"#f3f5f4","theme_color":"#172e2c","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
+{"name":"可视化汇编运行","short_name":"可视化汇编运行","description":"可离线使用的汇编教学模拟器","start_url":"./","scope":"./","display":"standalone","background_color":"#f3f5f4","theme_color":"#172e2c","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}

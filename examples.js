@@ -83,7 +83,7 @@ read_buffer:
     ret`},
     {id:'rip',title:'地址与内存不是一回事',tag:'05 · 相对寻址',description:'lea 取得地址，mov 读取内容。带符号的 RIP 相对寻址由汇编器计算位移。',input:'',code:`.data
 message:
-    .asciz "Hello, StackLens!"
+    .asciz "你好，可视化汇编运行！"
 number:
     .quad 42
 .text

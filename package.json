@@ -1,6 +1,6 @@
 {
-  "name": "stacklens",
-  "version": "0.2.1",
+  "name": "assembly-visualizer",
+  "version": "0.2.2",
   "private": true,
   "description": "Offline x86-64 AT&T teaching simulator",
   "license": "MIT",
