@@ -1,6 +1,7 @@
 (function (root) {
   'use strict';
   const Runtime=typeof module!=='undefined'&&module.exports?require('./runtime'):root.StackLensRuntime;
+  const Decoder=typeof module!=='undefined'&&module.exports?require('./decoder'):root.StackLensDecoder;
   const MASK = (1n << 64n) - 1n;
   const names = ['rax','rcx','rdx','rbx','rsp','rbp','rsi','rdi',...Array.from({length:8},(_,i)=>'r'+(i+8))];
   const regs = {};
@@ -410,28 +411,51 @@
       if(name==='puts'){this.output+=this.readString(this.readReg('rdi'))+'\n';result=1n;}
       if(name==='printf') {
         const format=this.readString(this.readReg('rdi'));let i=0;
-        const text=format.replace(/%%|%[duxsc]/g,s=>{if(s==='%%')return '%';if(i>=5)fail('printf 模型最多支持 5 个寄存器参数');const n=this.readReg(['rsi','rdx','rcx','r8','r9'][i++]);return s==='%s'?this.readString(n):s==='%c'?String.fromCharCode(Number(n&255n)):s==='%d'?signed(n,32).toString():s==='%u'?uint(n,32).toString():uint(n,32).toString(16);});
-        if(format.replace(/%%|%[duxsc]/g,'').includes('%'))fail('printf 模型仅支持 %d %u %x %s %c %%');this.output+=text;result=BigInt(new TextEncoder().encode(text).length);
+        const text=format.replace(/%%|%[duxscp]/g,s=>{if(s==='%%')return '%';if(i>=5)fail('printf 模型最多支持 5 个寄存器参数');const n=this.readReg(['rsi','rdx','rcx','r8','r9'][i++]);return s==='%p'?(n===0n?'(nil)':hex(n)):s==='%s'?this.readString(n):s==='%c'?String.fromCharCode(Number(n&255n)):s==='%d'?signed(n,32).toString():s==='%u'?uint(n,32).toString():uint(n,32).toString(16);});
+        if(format.replace(/%%|%[duxscp]/g,'').includes('%'))fail('printf 模型仅支持 %d %u %x %s %c %p %%');this.output+=text;result=BigInt(new TextEncoder().encode(text).length);
       }
       if(name==='exit'){this.status='halted';this.event.summary='exit 模型结束了程序';return;}
       this.writeReg('eax',result);this.returnFromCall(0n);this.event.summary=`模拟 ${name}，返回 ${hex(uint(result,32))}。这是教学函数模型。`;
       if(this.output.length>65536)fail('输出超过 64 KiB，请重置或缩小程序');
     }
     returnFromCall(extra) {
-      const target=this.pop(),frame=this.frames.pop();this.rip=target;this.writeReg('rsp',this.regs.rsp+extra);
+      const slot=this.regs.rsp,target=this.pop(),top=this.frames.at(-1);
+      // PUSH target; RET is also an indirect jump, not necessarily a function return.
+      const frame=top&&(top.returnSlot===null||slot>=top.returnSlot)?this.frames.pop():null;
+      this.rip=target;this.writeReg('rsp',this.regs.rsp+extra);
       if(frame){for(const b of this.buffers)if(b.frameId===frame.id)b.active=false;
         if(frame.returnAddress!==null&&target!==frame.returnAddress)this.event.warnings.push({type:'control',message:`实际返回到 ${hex(target)}，与原返回地址 ${hex(frame.returnAddress)} 不同。`});}
       if(target===this.sentinel&&this.harness){this.status='halted';this.event.summary='返回教学入口，程序运行结束。';}
     }
+    instructionAt(address=this.rip) {
+      const original=this.program.map.get(address);
+      const read=a=>{const r=this.regionAt(a);return r&&r.readable!==false?this.memory.get(a)??0:null;};
+      if(original&&original.bytes.every((b,i)=>read(address+BigInt(i))===b))return original;
+      const decoded=Decoder.decode(address,read);
+      return {...parseInstruction(decoded.text,0,true),...decoded,annotations:[]};
+    }
+    dynamicInstructions() {
+      const addresses=new Set();
+      for(const ev of [...this.history.map(h=>h.snapshot.lastEvent),this.lastEvent])if(ev?.decoded)addresses.add(ev.address);
+      const result=new Map();
+      for(const address of addresses){try{const ins=this.instructionAt(address);if(ins.dynamic)result.set(address,ins);}catch{}}
+      // Preview the current basic block so its instructions can receive breakpoints.
+      let address=this.rip;
+      for(let i=0;i<12;i++){
+        if(this.externalMap.has(address)&&!this.program.map.has(address))break;
+        try{const ins=this.instructionAt(address);if(!ins.dynamic)break;result.set(address,ins);address+=BigInt(ins.length);if(['ret','jmp','call','jcc','hlt'].includes(ins.op))break;}catch{break;}
+      }
+      return [...result.values()].sort((a,b)=>a.address<b.address?-1:1);
+    }
     step() {
       if(this.status!=='ready')return false;
-      const snapshot=this.snapshot();this.changes=new Map();const ins=this.program.map.get(this.rip),external=this.externalMap.get(this.rip);
+      const snapshot=this.snapshot();this.changes=new Map();let ins=this.program.map.get(this.rip);const external=this.externalMap.get(this.rip);
       this.event={step:this.steps+1,address:this.rip,instruction:ins?.text||external||'取指',reads:[],writes:[],warnings:[],summary:'',flagsBefore:{...this.flags}};
       try {
-        if(!ins&&!external)fail('没有载入目标地址 '+hex(this.rip)+' 的指令。返回地址可能已改变，或缺少被调用函数。');
         if(external&&!ins)this.model(external);
         else {
-          if(ins.bytes.some((b,i)=>{const a=ins.address+BigInt(i);return !this.regionAt(a)||(this.memory.get(a)??0)!==b;}))fail('目标指令的内存已被取消映射或改写；当前版本不动态解码新的机器码。');
+          ins=this.instructionAt();this.event.instruction=ins.text;
+          if(ins.dynamic)this.event.decoded=true;
           for(const b of ins.annotations) {const frame=this.frames.at(-1),id=`${frame?.id||0}:${b.line}`;
             if(!this.buffers.some(x=>x.id===id&&x.active)){const start=this.address(b.location,ins);this.buffers.push({id,name:b.name,start,end:start+BigInt(b.size),frameId:frame?.id,active:true});}}
           this.rip=ins.address+BigInt(ins.length);this.execute(ins);

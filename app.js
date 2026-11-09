@@ -5,7 +5,7 @@
   const defaultConfig={codeBase:'0x400000',dataBase:'0x600000',stackTop:'0x7fffffffe000',stackSize:16384,entry:'',harness:true,seed:'1',registers:{},regions:[],runtime:'auto',pid:1337,env:[],files:{}};
   let config={...defaultConfig},machine=null,program=null,activeExample='call',timer=null,running=false,dirty=false,selectedRegister='rax',memoryAnchor=0n,breakpoints=new Set(),view='execution';
   const registerOrder=architecture.registerOrder;
-  let drafts={};
+  let drafts={},runner=null,instructionSignature='';
   function notice(message,kind=''){const el=$('notice');el.textContent=message;el.className='notice '+kind;el.hidden=!message;}
   function currentConfig(){return {...config,input:$('input-data').value,inputMode:$('input-mode').value};}
   function saveDraft(){
@@ -18,8 +18,8 @@
     stop(false);
     try {
       const next=E.compile($('source-editor').value,config),nextMachine=new E.Machine(next,currentConfig());
-      program=next;machine=nextMachine;dirty=false;memoryAnchor=machine.regs.rsp;selectedRegister='rax';
-      buildInstructions();changeView('execution');notice(machine.elf?'已核对 ELF 与反汇编的机器码字节，载入常量、全局数据与库函数连接。指令仍按反汇编文本执行。':program.warnings.join(' '),program.warnings.length&&!machine.elf?'warn':'');render();saveDraft();return true;
+      program=next;machine=nextMachine;runner=new StackLensExecution.RunController(machine,breakpoints);instructionSignature='';dirty=false;memoryAnchor=machine.regs.rsp;selectedRegister='rax';
+      buildInstructions();changeView('execution');notice(machine.elf?'已核对 ELF 与反汇编的机器码字节，载入常量、全局数据与库函数连接。转入新的内存地址时，将尝试解码已支持的整数指令。':program.warnings.join(' '),program.warnings.length&&!machine.elf?'warn':'');render();saveDraft();return true;
     }catch(e){dirty=true;notice(e.message,'error');updateControls();changeView('editor');return false;}
   }
   function chooseExample(id){
@@ -34,19 +34,23 @@
     $('status').textContent=dirty?'待载入':running?'运行中':machine?.status==='fault'?'已停止':machine?.status==='halted'?'已结束':'就绪';
     $('step-count').textContent=String(machine?.steps||0).padStart(3,'0');$('step-button').disabled=dirty||!machine||machine.status!=='ready'||running;
     $('back-button').disabled=dirty||!machine?.history.length||running;$('run-button').disabled=!running&&(dirty||!machine||machine.status!=='ready');
-    $('run-button').innerHTML=running?'<svg><use href="#i-pause"/></svg><span>暂停</span>':'<svg><use href="#i-play"/></svg><span>运行</span>';
+    $('run-button').innerHTML=running?'<svg><use href="#i-pause"/></svg><span>暂停</span>':'<svg><use href="#i-play"/></svg><span>'+(runner?.warningAcknowledged?'继续运行':'运行')+'</span>';
     $('load-button').textContent=dirty?'载入修改':'载入程序';
   }
   function buildInstructions(){
     $('source-kind').textContent=program.mode==='disassembly'?'反汇编文本':'AT&T 源代码';$('instruction-total').textContent=program.instructions.length+' instructions';
+    const dynamic=machine.dynamicInstructions(),overrides=new Map(dynamic.map(i=>[i.address,i]));
     const labels=new Map();for(const [name,address]of Object.entries(program.symbols))if(!E.externals.includes(name)){if(!labels.has(address))labels.set(address,[]);labels.get(address).push(name);}
-    $('instruction-list').innerHTML=program.instructions.map(i=>{
+    const extra=dynamic.filter(i=>!program.map.has(i.address));
+    $('instruction-list').innerHTML=[...extra,...program.instructions.map(i=>overrides.get(i.address)||i)].map((i,index)=>{
       const args=i.text.slice(i.mnemonic.length).trim();const bytes=i.bytes.map(v=>v.toString(16).padStart(2,'0')).join(' ');
-      return (labels.has(i.address)?`<div class="label-row">${esc(labels.get(i.address).join(' / '))}:</div>`:'')+`<div class="instruction-row" data-address="${i.address}" title="第 ${i.line} 行 · ${esc(bytes)}"><button class="breakpoint" aria-label="在 ${E.hex(i.address)} 设置断点" aria-pressed="false" data-breakpoint="${i.address}"></button><span class="address">${E.hex(i.address).slice(2)}</span><span class="assembly"><span class="mnemonic">${esc(i.mnemonic)}</span>${esc(args)}</span><span class="byte-length">${i.length} B</span></div>`;
+      return (i.dynamic&&index===0?'<div class="label-row">内存中的指令 · 按当前字节解码</div>':'')+(labels.has(i.address)?`<div class="label-row">${esc(labels.get(i.address).join(' / '))}:</div>`:'')+`<div class="instruction-row" data-address="${i.address}" title="${i.dynamic?'内存解码':'第 '+i.line+' 行'} · ${esc(bytes)}"><button class="breakpoint" aria-label="在 ${E.hex(i.address)} 设置断点" aria-pressed="false" data-breakpoint="${i.address}"></button><span class="address">${E.hex(i.address).slice(2)}</span><span class="assembly"><span class="mnemonic">${esc(i.mnemonic)}</span>${esc(args)}</span><span class="byte-length">${i.length} B</span></div>`;
     }).join('');
   }
   function highlightCode(){
     if(!machine||!program)return;
+    const signature=machine.dynamicInstructions().map(i=>i.address+':'+i.bytes.join(',')).join(';');
+    if(signature!==instructionSignature){const scroll=$('instruction-list').scrollTop;buildInstructions();instructionSignature=signature;$('instruction-list').scrollTop=scroll;}
     const rows=$('instruction-list').querySelectorAll('.instruction-row');let current=null;
     rows.forEach(row=>{const address=BigInt(row.dataset.address),isCurrent=machine.status==='ready'&&address===machine.rip;row.classList.toggle('current',isCurrent);row.classList.toggle('executed',address===machine.lastEvent?.address);const button=row.querySelector('button');const set=breakpoints.has(row.dataset.address);button.textContent=set?'●':'';button.setAttribute('aria-pressed',String(set));if(isCurrent)current=row;});
     if(current&&view==='execution'){const parent=$('instruction-list'),r=current.getBoundingClientRect(),p=parent.getBoundingClientRect();if(r.top<p.top+12)parent.scrollTop-=p.top-r.top+40;else if(r.bottom>p.bottom-12)parent.scrollTop+=r.bottom-p.bottom+40;}
@@ -117,14 +121,15 @@
   function checkStop(){if(machine.status==='fault'){stop(false);notice(machine.error+' 可以回退查看上一步。','error');return true;}if(machine.status==='halted'){stop(false);notice('程序已结束。'+(machine.runtime.exitCode!==null?'退出码 '+machine.runtime.exitCode+'。':'')+'可以回退重看，也可以重置后再次运行。');return true;}return false;}
   function stop(show=true){if(timer)clearTimeout(timer);timer=null;const wasRunning=running;running=false;if(wasRunning)render();else updateControls();if(show&&wasRunning)notice('已暂停，可以单步或回退。');}
   function start(){
-    if(running){stop();return;}if(!machine||dirty||machine.status!=='ready')return;running=true;notice('');updateControls();let first=true;
+    if(running){stop();return;}if(!machine||dirty||machine.status!=='ready')return;runner.begin();running=true;notice('');updateControls();
     function tick(){
       if(!running)return;
       const until=performance.now()+12;
       for(let i=0;i<1000;i++){
-        if(!first&&breakpoints.has(machine.rip.toString())){stop(false);notice('到达断点 '+E.hex(machine.rip)+'，该指令尚未执行。');return;}first=false;
-        machine.step();if(checkStop())return;
-        if(machine.lastEvent?.warnings.length){stop(false);notice('检测到越界或控制数据覆盖，已暂停。可单步继续观察后果，也可以回退。','warn');return;}
+        const reason=runner.advance();
+        if(reason==='breakpoint'){stop(false);notice('到达断点 '+E.hex(machine.rip)+'，该指令尚未执行。');return;}
+        if(checkStop())return;
+        if(reason==='warning'){stop(false);notice('检测到越界或控制数据覆盖，已暂停。点击「继续运行」将保留告警并运行到断点、结束或异常；本次执行不再因覆盖告警反复暂停。可用「单步」观察，回退或重置后重新启用告警暂停。','warn');return;}
         if(performance.now()>=until)break;
       }
       // Yield to input so Pause remains responsive; refresh the views only at a stop.
@@ -136,7 +141,7 @@
   $('examples').innerHTML=examples.map(e=>`<button class="example-button" data-id="${e.id}"><small>${e.tag}</small><strong>${e.title}</strong></button>`).join('');
   $('examples').addEventListener('click',e=>{const b=e.target.closest('[data-id]');if(b)chooseExample(b.dataset.id);});
   $('load-button').addEventListener('click',()=>load());$('reset-button').addEventListener('click',()=>load());$('step-button').addEventListener('click',step);$('run-button').addEventListener('click',start);
-  $('back-button').addEventListener('click',()=>{stop(false);if(machine?.back()){notice('');render();}});
+  $('back-button').addEventListener('click',()=>{stop(false);if(machine?.back()){runner.resetWarnings();notice('');render();}});
   $('tab-editor').addEventListener('click',()=>{stop(false);changeView('editor');});$('tab-execution').addEventListener('click',()=>changeView('execution'));
   $('source-editor').addEventListener('input',markDirty);$('input-data').addEventListener('input',markDirty);$('input-mode').addEventListener('change',markDirty);
   $('source-editor').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();const t=e.target,start=t.selectionStart,end=t.selectionEnd;t.setRangeText('    ',start,end,'end');markDirty();}});
