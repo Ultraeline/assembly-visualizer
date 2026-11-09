@@ -2,10 +2,11 @@
   'use strict';
   const architecture=StackLensArchitectures.get('x86-64-att'),E=architecture.engine,examples=StackLensExamples,$=id=>document.getElementById(id);
   const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const defaultConfig={codeBase:'0x400000',dataBase:'0x600000',stackTop:'0x7fffffffe000',stackSize:16384,entry:'',harness:true,seed:'1',registers:{},regions:[],runtime:'auto',pid:1337,env:[],files:{}};
+  const W=StackLensWatch;
+  const defaultConfig={codeBase:'0x400000',dataBase:'0x600000',stackTop:'0x7fffffffe000',stackSize:16384,entry:'',harness:true,seed:'1',registers:{},regions:[],runtime:'auto',pid:1337,env:[],files:{},watches:[]};
   let config={...defaultConfig},machine=null,program=null,activeExample='call',timer=null,running=false,dirty=false,selectedRegister='rax',memoryAnchor=0n,breakpoints=new Set(),view='execution';
   const registerOrder=architecture.registerOrder;
-  let drafts={},runner=null,instructionSignature='';
+  let drafts={},runner=null,instructionSignature='',tracker=null,selectedWatch='',editingWatch='';
   function notice(message,kind=''){const el=$('notice');el.textContent=message;el.className='notice '+kind;el.hidden=!message;}
   function currentConfig(){return {...config,input:$('input-data').value,inputMode:$('input-mode').value};}
   function saveDraft(){
@@ -18,15 +19,16 @@
     stop(false);
     try {
       const next=E.compile($('source-editor').value,config),nextMachine=new E.Machine(next,currentConfig());
-      program=next;machine=nextMachine;runner=new StackLensExecution.RunController(machine,breakpoints);instructionSignature='';dirty=false;memoryAnchor=machine.regs.rsp;selectedRegister='rax';
+      const nextTracker=new W.Tracker(nextMachine,config.watches);
+      program=next;machine=nextMachine;tracker=nextTracker;config.watches=tracker.definitions();runner=new StackLensExecution.RunController(machine,breakpoints,()=>tracker.capture());instructionSignature='';dirty=false;memoryAnchor=machine.regs.rsp;selectedRegister='rax';
       buildInstructions();changeView('execution');notice(machine.elf?'已核对 ELF 与反汇编的机器码字节，载入常量、全局数据与库函数连接。转入新的内存地址时，将尝试解码已支持的整数指令。':program.warnings.join(' '),program.warnings.length&&!machine.elf?'warn':'');render();saveDraft();return true;
     }catch(e){dirty=true;notice(e.message,'error');updateControls();changeView('editor');return false;}
   }
   function chooseExample(id){
     const sample=examples.find(x=>x.id===id);if(!sample)return;
-    if(activeExample)drafts[activeExample]={source:$('source-editor').value,input:$('input-data').value,inputMode:$('input-mode').value};
+    if(activeExample)drafts[activeExample]={source:$('source-editor').value,input:$('input-data').value,inputMode:$('input-mode').value,watches:config.watches};
     activeExample=id;const saved=drafts[id];$('source-editor').value=saved?.source||sample.code;$('input-data').value=saved?.input??sample.input;$('input-mode').value=saved?.inputMode||'text';
-    config={...defaultConfig,registers:{},regions:[]};breakpoints.clear();$('follow-stack').checked=true;updateTitle();updateInputCount();load();
+    config={...defaultConfig,registers:{},regions:[],watches:saved?.watches||[]};breakpoints.clear();$('follow-stack').checked=true;updateTitle();updateInputCount();load();
   }
   function updateTitle(){const sample=examples.find(x=>x.id===activeExample);$('program-title').textContent=sample?.title||'我的汇编实验';$('program-description').textContent=sample?.description||'编辑汇编或导入反汇编，设置初始状态，观察每一次变化。';document.querySelectorAll('.example-button').forEach(b=>b.classList.toggle('active',b.dataset.id===activeExample));}
   function updateControls(){
@@ -36,6 +38,7 @@
     $('back-button').disabled=dirty||!machine?.history.length||running;$('run-button').disabled=!running&&(dirty||!machine||machine.status!=='ready');
     $('run-button').innerHTML=running?'<svg><use href="#i-pause"/></svg><span>暂停</span>':'<svg><use href="#i-play"/></svg><span>'+(runner?.warningAcknowledged?'继续运行':'运行')+'</span>';
     $('load-button').textContent=dirty?'载入修改':'载入程序';
+    for(const button of document.querySelectorAll('[data-watch-edit],[data-watch-remove],#add-watch'))button.disabled=running||dirty||!machine;
   }
   function buildInstructions(){
     $('source-kind').textContent=program.mode==='disassembly'?'反汇编文本':'AT&T 源代码';$('instruction-total').textContent=program.instructions.length+' instructions';
@@ -114,10 +117,10 @@
     $('memory-body').innerHTML=html;if(document.activeElement!==$('memory-address'))$('memory-address').value=E.hex(memoryAnchor);
     $('frames').innerHTML=machine.frames.length?machine.frames.map((f,i)=>`<button class="frame ${i===machine.frames.length-1?'active':''}" data-frame="${f.stackEntry}" title="查看 ${esc(f.name)} 的入口栈地址"><small>${String(i).padStart(2,'0')}</small>${esc(f.name)}</button>`).join(''):'<span class="frames-empty">已返回所有跟踪的调用</span>';
   }
-  function render(){if(!machine){updateControls();return;}highlightCode();renderRegisters();renderExplanation();renderMemory();$('console-output').textContent=machine.output||'等待 puts / printf / putchar 输出…';
+  function render(){if(!machine){updateControls();return;}highlightCode();renderRegisters();renderExplanation();renderMemory();renderWatches();$('console-output').textContent=machine.output||'等待 puts / printf / putchar 输出…';
     $('runtime-status').textContent=(machine.processMode?'Linux 进程教学环境':'函数教学环境')+(config.image?' · '+config.image.name:' · 未装载 ELF')+(machine.runtime.exitCode!==null?' · 退出码 '+machine.runtime.exitCode:'');
     $('remove-elf').hidden=!config.image;$('memory-regions').textContent=machine.regions.filter(r=>r.name!=='代码').map(r=>`${r.name}  ${E.hex(r.start)} — ${E.hex(r.end-1n)}  ${r.writable?'可写':'只读'}`).join('\n');updateControls();}
-  function step(){if(running||dirty||!machine||machine.status!=='ready')return;notice('');machine.step();render();checkStop();}
+  function step(){if(running||dirty||!machine||machine.status!=='ready')return;notice('');machine.step();tracker.capture();render();checkStop();}
   function checkStop(){if(machine.status==='fault'){stop(false);notice(machine.error+' 可以回退查看上一步。','error');return true;}if(machine.status==='halted'){stop(false);notice('程序已结束。'+(machine.runtime.exitCode!==null?'退出码 '+machine.runtime.exitCode+'。':'')+'可以回退重看，也可以重置后再次运行。');return true;}return false;}
   function stop(show=true){if(timer)clearTimeout(timer);timer=null;const wasRunning=running;running=false;if(wasRunning)render();else updateControls();if(show&&wasRunning)notice('已暂停，可以单步或回退。');}
   function start(){
@@ -137,11 +140,61 @@
     }tick();
   }
   function openSettings(){stop();const form=$('settings-form');for(const key of ['codeBase','dataBase','stackTop','stackSize','entry','seed','runtime','pid'])form.elements[key].value=config[key]??defaultConfig[key];form.elements.harness.checked=config.harness!==false;for(const key of ['registers','regions','env','files'])form.elements[key].value=JSON.stringify(config[key]||defaultConfig[key],null,2);form.elements.argv.value=JSON.stringify(config.argv||[config.image?.name||'program']);$('settings-error').textContent='';$('settings-dialog').showModal();}
+  function renderWatches(){
+    if(!tracker)return;
+    $('watch-count').textContent=tracker.items.length+' / '+W.MAX_WATCHES;
+    $('watch-empty').hidden=tracker.items.length>0;
+    if(!tracker.items.some(x=>x.def.id===selectedWatch))selectedWatch=tracker.items[0]?.def.id||'';
+    $('watch-list').innerHTML=tracker.items.map(item=>{
+      const d=item.def,c=item.current,last=item.records.at(-1),changed=last?.step===machine.steps;
+      return `<article class="watch-card ${changed?'changed':''} ${d.id===selectedWatch?'selected':''}"><div class="watch-heading"><button class="watch-name" data-watch-select="${d.id}" aria-pressed="${d.id===selectedWatch}">${esc(d.name)}</button><div><button class="button mini" data-watch-edit="${d.id}" aria-label="编辑变量 ${esc(d.name)}">编辑</button><button class="button mini" data-watch-remove="${d.id}" aria-label="移除变量 ${esc(d.name)}">移除</button></div></div><div class="watch-value ${c.available?'':'unavailable'}" title="${esc(c.error||'小端字节：'+c.raw)}">${esc(c.display)}</div><div class="watch-meta"><code>${esc(d.kind==='register'?c.location:d.expression+' → '+c.location)}</code><span>${d.kind==='memory'?(d.mode==='fixed'?'固定地址 · ':'跟随表达式 · '):''}${d.size} B · ${esc(W.formats[d.format])}</span>${c.error?`<span class="error-text">${esc(c.error)}</span>`:''}<span>${last?'最近变化：第 '+last.step+' 步':'从第 '+item.startStep+' 步开始观察'}${changed?' · 本步变化':''}</span></div></article>`;
+    }).join('');
+    const item=tracker.items.find(x=>x.def.id===selectedWatch);
+    $('watch-history').hidden=!item;
+    if(!item)return;
+    $('watch-history-title').textContent=item.def.name+' · 变化记录';
+    $('watch-history-count').textContent='保留最近 '+W.LIMIT+' 次 · 当前 '+item.records.length+' 次';
+    $('watch-history-body').innerHTML=item.records.length?[...item.records].reverse().map(r=>`<div class="watch-record"><div><b>第 ${r.step} 步</b><code>${esc(r.address)} · ${esc(r.instruction)}</code></div><div class="watch-delta"><span title="${esc(r.before.location+' · '+(r.before.error||r.before.raw))}">${esc(r.before.display)}</span><span aria-label="变为">→</span><strong title="${esc(r.after.location+' · '+(r.after.error||r.after.raw))}">${esc(r.after.display)}</strong></div>${r.before.location!==r.after.location?`<div class="watch-address-change">地址 ${esc(r.before.location)} → ${esc(r.after.location)}</div>`:''}</div>`).join(''):'<p class="watch-hint">还没有变化。单步或运行后，在这里查看指令与前后值。</p>';
+  }
+  function watchFields(){
+    const f=$('watch-form'),memory=f.elements.kind.value==='memory';
+    $('watch-size-label').hidden=!memory;$('watch-mode-label').hidden=!memory;
+    for(const option of f.elements.format.options)option.disabled=!memory&&['bytes','text'].includes(option.value);
+    if(!memory&&['bytes','text'].includes(f.elements.format.value))f.elements.format.value='signed';
+    f.elements.expression.placeholder=memory?'-8(%rbp)、0x600000 或标签':'rax、eax、al…';
+    $('watch-location-hint').textContent=memory?'跟随表达式会随 RBP / RSP 改变位置。固定地址适合观察当前栈帧，需先运行到地址有效处；修改位置或地址方式会重新绑定。':'自动使用寄存器自身宽度：RAX 8 字节，EAX 4 字节，AL 1 字节。';
+  }
+  function openWatch(id=''){
+    if(running||dirty||!machine)return;
+    editingWatch=id;const d=tracker.items.find(x=>x.def.id===id)?.def,f=$('watch-form');f.reset();
+    $('watch-dialog-title').textContent=d?'编辑变量':'添加变量';
+    for(const key of ['name','kind','expression','format','size','mode'])if(d?.[key]!==undefined)f.elements[key].value=d[key];
+    $('watch-error').textContent='';watchFields();$('watch-dialog').showModal();
+  }
+  function saveWatches(){config.watches=tracker.definitions();renderWatches();updateControls();saveDraft();}
+  $('add-watch').addEventListener('click',()=>openWatch());
+  $('watch-cancel').addEventListener('click',()=>$('watch-dialog').close());
+  $('watch-form').elements.kind.addEventListener('change',watchFields);
+  $('watch-form').addEventListener('submit',e=>{
+    e.preventDefault();const f=e.currentTarget;
+    try{
+      const value={};for(const key of ['name','kind','expression','format','size','mode'])value[key]=f.elements[key].value;
+      const old=tracker.items.find(x=>x.def.id===editingWatch)?.def;
+      if(old?.mode==='fixed'&&value.mode==='fixed'&&old.expression===value.expression.trim()&&old.kind===value.kind)value.address=old.address;
+      const item=editingWatch?tracker.update(editingWatch,value):tracker.add(value);selectedWatch=item.def.id;saveWatches();$('watch-dialog').close();
+    }catch(err){$('watch-error').textContent=err.message;}
+  });
+  $('watch-list').addEventListener('click',e=>{
+    const select=e.target.closest('[data-watch-select]'),edit=e.target.closest('[data-watch-edit]'),remove=e.target.closest('[data-watch-remove]');
+    if(select){selectedWatch=select.dataset.watchSelect;renderWatches();updateControls();}
+    if(edit)openWatch(edit.dataset.watchEdit);
+    if(remove&&!running&&!dirty){tracker.remove(remove.dataset.watchRemove);saveWatches();}
+  });
   function validateProject(value){if(!value||value.version!==1||typeof value.source!=='string'||value.source.length>1000000)throw new Error('不是有效的“可视化汇编运行”v1 实验文件');if(value.config&&typeof value.config!=='object')throw new Error('实验设置格式错误');}
   $('examples').innerHTML=examples.map(e=>`<button class="example-button" data-id="${e.id}"><small>${e.tag}</small><strong>${e.title}</strong></button>`).join('');
   $('examples').addEventListener('click',e=>{const b=e.target.closest('[data-id]');if(b)chooseExample(b.dataset.id);});
   $('load-button').addEventListener('click',()=>load());$('reset-button').addEventListener('click',()=>load());$('step-button').addEventListener('click',step);$('run-button').addEventListener('click',start);
-  $('back-button').addEventListener('click',()=>{stop(false);if(machine?.back()){runner.resetWarnings();notice('');render();}});
+  $('back-button').addEventListener('click',()=>{stop(false);if(machine?.back()){runner.resetWarnings();tracker.rewind();notice('');render();}});
   $('tab-editor').addEventListener('click',()=>{stop(false);changeView('editor');});$('tab-execution').addEventListener('click',()=>changeView('execution'));
   $('source-editor').addEventListener('input',markDirty);$('input-data').addEventListener('input',markDirty);$('input-mode').addEventListener('change',markDirty);
   $('source-editor').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();const t=e.target,start=t.selectionStart,end=t.selectionEnd;t.setRangeText('    ',start,end,'end');markDirty();}});
@@ -161,7 +214,7 @@
     }catch(err){$('settings-error').textContent=err.message;}
   });
   for(const id of ['help-button','about-button'])$(id).addEventListener('click',()=>{stop(false);$('help-dialog').showModal();});$('help-close').addEventListener('click',()=>$('help-dialog').close());
-  $('export-button').addEventListener('click',()=>{const project={version:1,source:$('source-editor').value,config:currentConfig(),example:activeExample,breakpoints:[...breakpoints]};const url=URL.createObjectURL(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='可视化汇编运行-实验.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notice('已导出实验文件：包括代码、输入、初始状态和断点。重新导入后从起点运行。');});
+  $('export-button').addEventListener('click',()=>{const project={version:1,source:$('source-editor').value,config:currentConfig(),example:activeExample,breakpoints:[...breakpoints]};const url=URL.createObjectURL(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='可视化汇编运行-实验.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notice('已导出实验文件：包括代码、输入、初始状态、断点和变量绑定（不含变化记录）。重新导入后从起点运行。');});
   $('import-button').addEventListener('click',()=>$('file-input').click());
   $('file-input').addEventListener('change',async e=>{
     const file=e.target.files[0];if(!file)return;stop(false);

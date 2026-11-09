@@ -347,3 +347,37 @@ main{margin:0;padding:20px 12px}
 .runtime-bar>div{flex-basis:100%}
 .controls select{max-width:56px}
 }
+.watch-empty,.watch-hint{font-size:11px;line-height:1.9;color:var(--muted)}
+.watch-empty{padding:4px 18px 15px;margin:8px 0}
+.watch-empty code{color:var(--accent);font:11px var(--mono)}
+.watch-empty span{margin:0 8px}
+#watch-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;padding:0 15px 14px}
+#watch-list:empty{display:none}
+.watch-card{border:1px solid var(--line);border-radius:7px;padding:12px;min-width:0;background:var(--surface)}
+.watch-card.selected{border-color:var(--accent-border);box-shadow:inset 3px 0 var(--accent)}
+.watch-card.changed{background:var(--accent-soft)}
+.watch-heading{display:flex;align-items:start;justify-content:space-between;gap:8px}
+.watch-heading>div{display:flex;gap:4px;flex-shrink:0}
+.watch-heading .button{padding:3px 5px;font-size:9px}
+.watch-name{border:0;background:transparent;text-align:left;padding:2px 0;color:var(--ink);font-size:12px;font-weight:600;overflow-wrap:anywhere;cursor:pointer}
+.watch-name[aria-pressed=true]{color:var(--accent)}
+.watch-value{font:16px/1.6 var(--mono);color:var(--ink);margin:10px 0 5px;overflow-wrap:anywhere;white-space:pre-wrap}
+.watch-value.unavailable{font-size:12px;color:var(--muted)}
+.watch-meta{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:9px;line-height:1.6;overflow-wrap:anywhere}
+.watch-meta code{font:10px/1.6 var(--mono)}
+#watch-history{border-top:1px solid var(--line)}
+.watch-history-heading{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:13px 16px 8px;flex-wrap:wrap}
+.watch-history-heading h3{font-size:11px;margin:0;overflow-wrap:anywhere}
+.watch-history-heading span{font-size:9px;color:var(--muted)}
+#watch-history-body{max-height:270px;overflow:auto;padding:0 16px 8px}
+.watch-record{padding:10px 0;border-bottom:1px solid var(--line);font-size:10px}
+.watch-record:last-child{border-bottom:0}
+.watch-record>div:first-child{display:flex;align-items:baseline;gap:10px}
+.watch-record b{color:var(--accent);white-space:nowrap}
+.watch-record code{font:10px/1.7 var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.watch-delta{display:flex;gap:10px;align-items:baseline;font:12px/1.8 var(--mono);padding-top:5px;overflow-wrap:anywhere}
+.watch-delta>span:first-child{color:var(--muted)}
+.watch-delta>span,.watch-delta>strong{min-width:0;white-space:pre-wrap}
+.watch-delta strong{font-weight:500;color:var(--accent)}
+.watch-address-change{font:9px/1.8 var(--mono);color:var(--muted);overflow-wrap:anywhere}
+@media(max-width:1020px){.watch-panel{order:5}.console-panel{order:6}}
