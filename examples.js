@@ -103,7 +103,26 @@ main:
   40010f: 00
   400110: 48 8b 45 f8           mov    -0x8(%rbp),%rax
   400114: c9                    leave
-  400115: c3                    ret`}
+  400115: c3                    ret`},
+    {id:'dynamic-stack',title:'动态分配的栈空间',tag:'07 · 动态栈空间',description:'sub %rax, %rsp 分配 96 字节，观察跨函数写入、分页、部分释放与回退。',input:'',code:`.text
+.globl main
+main:
+    pushq %rbp
+    movq %rsp, %rbp
+    movq $96, %rax
+    subq %rax, %rsp
+    movq %rsp, %rdi
+    call fill_space
+    movq $1, %rax
+    addq $32, %rsp
+    leave
+    ret
+
+fill_space:
+    movb $65, (%rdi)
+    movb $66, 64(%rdi)
+    movb $67, 95(%rdi)
+    ret`}
   ];
   root.StackLensExamples=examples;if(typeof module!=='undefined')module.exports=examples;
 })(typeof globalThis!=='undefined'?globalThis:this);

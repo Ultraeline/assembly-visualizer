@@ -3,10 +3,12 @@
   const architecture=StackLensArchitectures.get('x86-64-att'),E=architecture.engine,examples=StackLensExamples,$=id=>document.getElementById(id);
   const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const W=StackLensWatch;
+  const S=StackLensStack;
   const defaultConfig={codeBase:'0x400000',dataBase:'0x600000',stackTop:'0x7fffffffe000',stackSize:16384,entry:'',harness:true,seed:'1',registers:{},regions:[],runtime:'auto',pid:1337,env:[],files:{},watches:[]};
   let config={...defaultConfig},machine=null,program=null,activeExample='call',timer=null,running=false,dirty=false,selectedRegister='rax',memoryAnchor=0n,breakpoints=new Set(),view='execution';
   const registerOrder=architecture.registerOrder;
   let drafts={},runner=null,instructionSignature='',tracker=null,selectedWatch='',editingWatch='';
+  let selectedSpace=null,spaceOffset=0n;
   function notice(message,kind=''){const el=$('notice');el.textContent=message;el.className='notice '+kind;el.hidden=!message;}
   function currentConfig(){return {...config,input:$('input-data').value,inputMode:$('input-mode').value};}
   function saveDraft(){
@@ -20,7 +22,7 @@
     try {
       const next=E.compile($('source-editor').value,config),nextMachine=new E.Machine(next,currentConfig());
       const nextTracker=new W.Tracker(nextMachine,config.watches);
-      program=next;machine=nextMachine;tracker=nextTracker;config.watches=tracker.definitions();runner=new StackLensExecution.RunController(machine,breakpoints,()=>tracker.capture());instructionSignature='';dirty=false;memoryAnchor=machine.regs.rsp;selectedRegister='rax';
+      program=next;machine=nextMachine;tracker=nextTracker;config.watches=tracker.definitions();runner=new StackLensExecution.RunController(machine,breakpoints,()=>tracker.capture());instructionSignature='';dirty=false;memoryAnchor=machine.regs.rsp;selectedRegister='rax';selectedSpace=null;spaceOffset=0n;
       buildInstructions();changeView('execution');notice(machine.elf?'已核对 ELF 与反汇编的机器码字节，载入常量、全局数据与库函数连接。转入新的内存地址时，将尝试解码已支持的整数指令。':program.warnings.join(' '),program.warnings.length&&!machine.elf?'warn':'');render();saveDraft();return true;
     }catch(e){dirty=true;notice(e.message,'error');updateControls();changeView('editor');return false;}
   }
@@ -39,6 +41,7 @@
     $('run-button').innerHTML=running?'<svg><use href="#i-pause"/></svg><span>暂停</span>':'<svg><use href="#i-play"/></svg><span>'+(runner?.warningAcknowledged?'继续运行':'运行')+'</span>';
     $('load-button').textContent=dirty?'载入修改':'载入程序';
     for(const button of document.querySelectorAll('[data-watch-edit],[data-watch-remove],#add-watch'))button.disabled=running||dirty||!machine;
+    $('stack-space-watch').disabled=running||dirty||!machine;
   }
   function buildInstructions(){
     $('source-kind').textContent=program.mode==='disassembly'?'反汇编文本':'AT&T 源代码';$('instruction-total').textContent=program.instructions.length+' instructions';
@@ -117,7 +120,7 @@
     $('memory-body').innerHTML=html;if(document.activeElement!==$('memory-address'))$('memory-address').value=E.hex(memoryAnchor);
     $('frames').innerHTML=machine.frames.length?machine.frames.map((f,i)=>`<button class="frame ${i===machine.frames.length-1?'active':''}" data-frame="${f.stackEntry}" title="查看 ${esc(f.name)} 的入口栈地址"><small>${String(i).padStart(2,'0')}</small>${esc(f.name)}</button>`).join(''):'<span class="frames-empty">已返回所有跟踪的调用</span>';
   }
-  function render(){if(!machine){updateControls();return;}highlightCode();renderRegisters();renderExplanation();renderMemory();renderWatches();$('console-output').textContent=machine.output||'等待 puts / printf / putchar 输出…';
+  function render(){if(!machine){updateControls();return;}highlightCode();renderRegisters();renderExplanation();renderMemory();renderWatches();renderStackSpaces();$('console-output').textContent=machine.output||'等待 puts / printf / putchar 输出…';
     $('runtime-status').textContent=(machine.processMode?'Linux 进程教学环境':'函数教学环境')+(config.image?' · '+config.image.name:' · 未装载 ELF')+(machine.runtime.exitCode!==null?' · 退出码 '+machine.runtime.exitCode:'');
     $('remove-elf').hidden=!config.image;$('memory-regions').textContent=machine.regions.filter(r=>r.name!=='代码').map(r=>`${r.name}  ${E.hex(r.start)} — ${E.hex(r.end-1n)}  ${r.writable?'可写':'只读'}`).join('\n');updateControls();}
   function step(){if(running||dirty||!machine||machine.status!=='ready')return;notice('');machine.step();tracker.capture();render();checkStop();}
@@ -172,6 +175,45 @@
     $('watch-error').textContent='';watchFields();$('watch-dialog').showModal();
   }
   function saveWatches(){config.watches=tracker.definitions();renderWatches();updateControls();saveDraft();}
+  const spaceKinds={dynamic:'动态分配',constant:'常量分配',alignment:'栈对齐'};
+  const spaceStates={active:'使用中',partial:'部分释放',released:'已释放'};
+  function currentSpace(){return machine?.stackSpaces.items.find(s=>s.id===selectedSpace);}
+  function renderStackSpaces(){
+    const items=machine.stackSpaces.items;
+    $('stack-space-count').textContent=items.length+' / '+S.MAX_SPACES;
+    $('stack-space-empty').hidden=items.length>0;$('stack-space-content').hidden=!items.length;
+    if(!items.length){selectedSpace=null;spaceOffset=0n;return;}
+    if(!currentSpace()){selectedSpace=items.at(-1).id;spaceOffset=0n;}
+    const space=currentSpace(),size=space.end-space.start;
+    $('stack-space-select').innerHTML=[...items].reverse().map(s=>`<option value="${s.id}" ${s.id===selectedSpace?'selected':''}>#${s.id} · ${esc(s.frameName)} · ${s.end-s.start} B · ${spaceKinds[s.kind]} · ${spaceStates[s.status]}</option>`).join('');
+    $('stack-space-info').innerHTML=`<div class="stack-space-size"><strong>${size.toString()}<small> 字节</small></strong><span class="space-state ${space.status}">${spaceStates[space.status]}</span><span>${spaceKinds[space.kind]}</span></div><p><code>${E.hex(space.start)} → ${E.hex(space.end-1n)}</code><span>低地址 → 高地址（含两端）</span></p><p>第 ${space.step} 步 · <code>${E.hex(space.address)} · ${esc(space.instruction)}</code></p>`;
+    const page=S.page(machine,space,spaceOffset);spaceOffset=page.offset;
+    $('stack-page-offset').value=E.hex(spaceOffset);$('stack-page-prev').disabled=!page.hasPrevious;$('stack-page-next').disabled=!page.hasNext;
+    $('stack-page-range').textContent='偏移 '+spaceOffset+'–'+(page.end-space.start-1n)+' / '+size+' B';
+    const changed=new Set();
+    for(const w of machine.lastEvent?.writes||[])if(w.kind==='mem')for(let i=0;i<w.after.length;i++)if(w.before[i]!==w.after[i])changed.add((w.address+BigInt(i)).toString());
+    let rows='';
+    for(let i=0;i<page.bytes.length;i+=8){
+      const bytes=page.bytes.slice(i,i+8),first=bytes[0];
+      rows+=`<tr><td><code>${first.address.toString(16)}</code><small>+${first.address-space.start}</small></td><td><div class="memory-bytes">${bytes.map(b=>`<span class="memory-byte ${b.value===null?'unmapped':''} ${b.released?'space-byte-released':''} ${changed.has(b.address.toString())?'changed':''}" title="${E.hex(b.address)} · ${b.released?'已释放 · ':''}${b.value===null?'未映射或不可读':b.value}">${b.value===null?'—':b.value.toString(16).padStart(2,'0')}</span>`).join('')}</div></td><td class="mono">${bytes.map(b=>b.value!==null&&b.value>=32&&b.value<127?esc(String.fromCharCode(b.value)):'·').join('')}</td></tr>`;
+    }
+    $('stack-space-bytes').innerHTML=rows;
+    $('stack-space-life').textContent=space.status==='released'?'第 '+space.releaseStep+' 步已释放（'+space.releaseInstruction+'）。下方字节是当前内存，可能被后续分配复用；内容记录停止于释放时。':space.status==='partial'?'仍保留 '+(space.end-space.liveStart)+' 字节，从 '+E.hex(space.liveStart)+' 开始。灰色字节已释放，后续只记录仍保留范围内的变化。':'这块空间固定在分配时的地址，后续 call / push 或进入其他函数不会改变观察位置。';
+    $('stack-space-history-title').textContent='内容变化记录 · '+space.changes.length+' / '+S.MAX_CHANGES;
+    $('stack-space-history-body').innerHTML=space.changes.length?[...space.changes].reverse().map(c=>`<div class="watch-record"><div><b>第 ${c.step} 步</b><code>${E.hex(c.address)} · ${esc(c.instruction)}</code></div><p>${c.count} 次字节变化${c.count>c.samples.length?'，列出前 '+c.samples.length+' 次':''}</p><div class="stack-write-samples">${c.samples.map(b=>`<span title="${E.hex(b.address)}">+${b.address-space.start}: <i>${b.before.toString(16).padStart(2,'0')}</i> → <b>${b.after.toString(16).padStart(2,'0')}</b></span>`).join('')}</div></div>`).join(''):'<p class="watch-hint">尚无内容变化。分配本身只移动 RSP，不会清零内存；后续写入会记录在这里。</p>';
+  }
+  $('stack-space-select').addEventListener('change',e=>{selectedSpace=Number(e.target.value);spaceOffset=0n;$('stack-page-error').textContent='';renderStackSpaces();});
+  $('stack-page-prev').addEventListener('click',()=>{spaceOffset=spaceOffset>64n?spaceOffset-64n:0n;renderStackSpaces();});
+  $('stack-page-next').addEventListener('click',()=>{spaceOffset+=64n;renderStackSpaces();});
+  $('stack-page-form').addEventListener('submit',e=>{
+    e.preventDefault();try{const offset=E.expression($('stack-page-offset').value),space=currentSpace();if(!space||offset<0n||offset>=space.end-space.start)throw new Error('偏移须在所选空间的范围内');spaceOffset=offset;$('stack-page-error').textContent='';renderStackSpaces();}catch(err){$('stack-page-error').textContent=err.message;}
+  });
+  function locateSpace(boundary=false){const space=currentSpace();if(!space)return;$('follow-stack').checked=false;memoryAnchor=boundary?space.end:space.start+spaceOffset;renderMemory();$('memory-address').focus();}
+  $('stack-space-locate').addEventListener('click',()=>locateSpace());$('stack-space-boundary').addEventListener('click',()=>locateSpace(true));
+  $('stack-space-watch').addEventListener('click',()=>{
+    const space=currentSpace();if(!space||running||dirty)return;
+    try{const page=S.page(machine,space,spaceOffset),item=tracker.add({name:'栈空间 #'+space.id+' +'+spaceOffset,kind:'memory',expression:E.hex(page.start),format:'bytes',size:page.bytes.length,mode:'fixed',address:E.hex(page.start)});selectedWatch=item.def.id;saveWatches();notice('已把当前页添加到变量监视，可在那里改名或切换显示类型。');}catch(err){notice(err.message,'error');}
+  });
   $('add-watch').addEventListener('click',()=>openWatch());
   $('watch-cancel').addEventListener('click',()=>$('watch-dialog').close());
   $('watch-form').elements.kind.addEventListener('change',watchFields);

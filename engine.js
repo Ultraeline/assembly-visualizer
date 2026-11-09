@@ -2,6 +2,7 @@
   'use strict';
   const Runtime=typeof module!=='undefined'&&module.exports?require('./runtime'):root.StackLensRuntime;
   const Decoder=typeof module!=='undefined'&&module.exports?require('./decoder'):root.StackLensDecoder;
+  const Stack=typeof module!=='undefined'&&module.exports?require('./stack'):root.StackLensStack;
   const MASK = (1n << 64n) - 1n;
   const names = ['rax','rcx','rdx','rbx','rsp','rbp','rsi','rdi',...Array.from({length:8},(_,i)=>'r'+(i+8))];
   const regs = {};
@@ -326,7 +327,7 @@
   class Machine {
     constructor(program,config={}) {
       this.program=program;this.config=config;this.regs=Object.fromEntries(names.map(n=>[n,0n]));this.flags={ZF:false,SF:false,CF:false,OF:false,PF:false,AF:false};
-      this.memory=new Map();this.regions=[];this.history=[];this.frames=[];this.buffers=[];this.provenance={};this.output='';this.input=new TextEncoder().encode(config.input??'');
+      this.memory=new Map();this.regions=[];this.history=[];this.frames=[];this.buffers=[];this.stackSpaces=Stack.initial();this.provenance={};this.output='';this.input=new TextEncoder().encode(config.input??'');
       if(config.inputMode==='hex') {const s=(config.input??'').replace(/\s/g,'');if(!/^(?:[\da-f]{2})*$/i.test(s))fail('十六进制输入需要完整字节，例如 41 42 00');this.input=Uint8Array.from(s.match(/../g)||[],x=>parseInt(x,16));}
       if(this.input.length>65536)fail('输入最多 65536 字节');
       this.inputPos=0;this.seed=uint(expression(config.seed||'1'),32);this.steps=0;this.status='ready';this.error='';this.lastEvent=null;this.frameId=0;
@@ -397,7 +398,7 @@
       const n=conditions[c];need(n<2?['OF']:n<4?['CF']:n<6?['ZF']:n<8?['CF','ZF']:n<10?['SF']:n<12?['PF']:n<14?['SF','OF']:['ZF','SF','OF']);
       return [f.OF,!f.OF,f.CF,!f.CF,f.ZF,!f.ZF,f.CF||f.ZF,!f.CF&&!f.ZF,f.SF,!f.SF,f.PF,!f.PF,f.SF!==f.OF,f.SF===f.OF,f.ZF||f.SF!==f.OF,!f.ZF&&f.SF===f.OF][n];
     }
-    snapshot(){return {regs:{...this.regs},flags:{...this.flags},rip:this.rip,frames:this.frames.map(x=>({...x})),buffers:this.buffers.map(x=>({...x})),provenance:{...this.provenance},output:this.output,inputPos:this.inputPos,seed:this.seed,steps:this.steps,status:this.status,error:this.error,lastEvent:this.lastEvent,frameId:this.frameId,regions:[...this.regions],runtime:Runtime.snapshot(this.runtime),externalMap:new Map(this.externalMap)};}
+    snapshot(){return {regs:{...this.regs},flags:{...this.flags},rip:this.rip,frames:this.frames.map(x=>({...x})),buffers:this.buffers.map(x=>({...x})),stackSpaces:this.stackSpaces,provenance:{...this.provenance},output:this.output,inputPos:this.inputPos,seed:this.seed,steps:this.steps,status:this.status,error:this.error,lastEvent:this.lastEvent,frameId:this.frameId,regions:[...this.regions],runtime:Runtime.snapshot(this.runtime),externalMap:new Map(this.externalMap)};}
     restore(s){Object.assign(this,s);}
     back() {const h=this.history.pop();if(!h)return false;for(const [a,v]of h.changes){if(v===undefined)this.memory.delete(a);else this.memory.set(a,v);}this.restore(h.snapshot);return true;}
     readString(address){const out=[];for(let i=0;i<4096;i++){const c=Number(this.readMemory(address+BigInt(i),8));if(c===0)return new TextDecoder().decode(Uint8Array.from(out));out.push(c);}fail('字符串在 4096 字节内没有终止符');}
@@ -461,6 +462,7 @@
           this.rip=ins.address+BigInt(ins.length);this.execute(ins);
         }
         this.steps++;this.event.flagsAfter={...this.flags};this.event.rspBefore=snapshot.regs.rsp;this.event.rspAfter=this.regs.rsp;
+        this.stackSpaces=Stack.advance(this.stackSpaces,this,snapshot,ins);
         if(!this.event.summary)this.event.summary=describe(ins,this.event);
         this.lastEvent=this.event;
       }catch(e) {
