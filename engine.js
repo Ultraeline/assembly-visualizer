@@ -390,12 +390,18 @@
       delete this.provenance?.[r.name];if(provenance&&r.bits===64)this.provenance[r.name]=provenance;
       if(this.event)this.event.writes.push({kind:'reg',name:key,fullName:r.name,before:old,after:this.regs[r.name],bits:r.bits,value:v});
     }
-    address(op,ins) {
+    address(op,ins,track=true) {
       let d=expression(op.expr,this.program.symbols);
       if(op.base==='rip') {if(!/[A-Za-z_.$]/.test(op.expr.replace(/0x[\da-f]+/gi,'')))d+=ins.address+BigInt(ins.length);}
-      else if(op.base)d+=this.readReg(op.base);
-      if(op.index)d+=this.readReg(op.index)*BigInt(op.scale);return uint(d);
+      else if(op.base)d+=this.readReg(op.base,track);
+      if(op.index)d+=this.readReg(op.index,track)*BigInt(op.scale);return uint(d);
     }
+    dataLocation(op,ins,bits=ins.bits) {
+      if(op.kind==='reg'){const r=regs[op.reg];return {kind:'reg',name:r.name,start:BigInt(r.shift/8),size:r.bits/8};}
+      if(op.kind==='mem')return {kind:'mem',start:this.address(op,ins,false),size:bits/8};
+      return null;
+    }
+    transfer(from,to,extension='') {if(from&&to)this.event.transfers.push({from,to,extension});}
     readMemory(address,bits) {this.checkMemory(address,bits/8);let v=0n;for(let i=bits/8-1;i>=0;i--)v=(v<<8n)|BigInt(this.memory.get(address+BigInt(i))??0);if(this.event)this.event.reads.push({kind:'mem',address,bits,value:v});return v;}
     writeMemory(address,bits,value,pointer=null) {
       const size=bits/8;this.checkMemory(address,size,true);const before=this.peek(address,size),after=bytesLE(value,size);
@@ -474,7 +480,7 @@
     step() {
       if(this.status!=='ready')return false;
       const snapshot=this.snapshot();this.changes=new Map();let ins=this.program.map.get(this.rip);const external=this.externalMap.get(this.rip);
-      this.event={step:this.steps+1,address:this.rip,instruction:ins?.text||external||'取指',reads:[],writes:[],warnings:[],summary:'',flagsBefore:{...this.flags}};
+      this.event={step:this.steps+1,address:this.rip,instruction:ins?.text||external||'取指',reads:[],writes:[],transfers:[],warnings:[],summary:'',flagsBefore:{...this.flags}};
       try {
         if(external&&!ins)this.model(external);
         else {
@@ -490,28 +496,31 @@
         this.lastEvent=this.event;
       }catch(e) {
         for(const [a,v]of this.changes){if(v===undefined)this.memory.delete(a);else this.memory.set(a,v);}this.restore(snapshot);
-        this.status='fault';this.error=e.message;this.lastEvent={...this.event,reads:[],writes:[],warnings:[],summary:e.message,fault:true};this.changes=new Map();
+        this.status='fault';this.error=e.message;this.lastEvent={...this.event,reads:[],writes:[],transfers:[],warnings:[],summary:e.message,fault:true};this.changes=new Map();
       }
       this.history.push({snapshot,changes:this.changes});if(this.history.length>2000)this.history.shift();this.event=null;this.changes=null;return true;
     }
     execute(ins) {
       const {op,args:a,bits}=ins;const read=(x,b=bits)=>this.read(x,ins,b),write=(x,v,p=null)=>this.write(x,ins,v,p);
       if(['mov','movabs','movzx','movsx'].includes(op)) {
+        const from=this.dataLocation(a[0],ins,ins.fromBits||bits),to=this.dataLocation(a[1],ins);
         let v=read(a[0],ins.fromBits||bits);if(op==='movsx')v=signed(v,ins.fromBits);write(a[1],v,this.pointer(a[0]));
+        this.transfer(from,to,op==='movsx'?'sign':op==='movzx'?'zero':'');
         if(op==='mov'&&a[0].reg==='rsp'&&a[1].reg==='rbp'&&this.frames.length)this.frames.at(-1).base=this.regs.rbp;return;
       }
       if(op==='xchg') {
         // Opcode 90 is the NOP alias, even for EAX: it must not clear upper RAX.
         if(a[0].kind==='reg'&&a[0].reg===a[1].reg&&['ax','eax','rax'].includes(a[0].reg)&&ins.bytes.at(-1)===0x90) {this.event.summary='XCHG 自交换的 90 编码是 NOP 别名，不改变寄存器或标志位。';return;}
-        const first=read(a[0]),second=read(a[1]),firstPointer=this.pointer(a[0]),secondPointer=this.pointer(a[1]);
+        const first=read(a[0]),second=read(a[1]),firstPointer=this.pointer(a[0]),secondPointer=this.pointer(a[1]),firstLocation=this.dataLocation(a[0],ins),secondLocation=this.dataLocation(a[1],ins);
         // Complete a memory write before changing a register that may form its address.
         if(a[0].kind==='mem'){write(a[0],second,secondPointer);write(a[1],first,firstPointer);}
         else {write(a[1],first,firstPointer);write(a[0],second,secondPointer);}
+        this.transfer(firstLocation,secondLocation);this.transfer(secondLocation,firstLocation);
         this.event.summary='交换两个操作数的值，标志位保持不变。';return;
       }
       if(op==='lea'){const v=this.address(a[0],ins),buffer=[...this.buffers].reverse().find(b=>b.active&&v>=b.start&&v<b.end);write(a[1],v,buffer?.id||null);return;}
-      if(op==='push'){this.push(read(a[0]),bits);return;}
-      if(op==='pop'){const v=this.pop(bits);write(a[0],v);return;}
+      if(op==='push'){const from=this.dataLocation(a[0],ins);this.push(read(a[0]),bits);this.transfer(from,{kind:'mem',start:this.regs.rsp,size:bits/8});return;}
+      if(op==='pop'){const from={kind:'mem',start:this.regs.rsp,size:bits/8},v=this.pop(bits),to=this.dataLocation(a[0],ins);write(a[0],v);this.transfer(from,to);return;}
       if(op==='call') {
         const target=read(a[0],64),ret=this.rip;this.push(ret);this.rip=target;
         this.frames.push({id:++this.frameId,name:this.program.externalMap.get(target)||this.nameAt(target),entry:target,returnSlot:this.regs.rsp,returnAddress:ret,base:null,stackEntry:this.regs.rsp});return;
@@ -524,8 +533,7 @@
       if(op==='pause'||(op==='nop'&&ins.repeatPrefix)){this.event.summary='PAUSE 是自旋等待提示；本教学模拟不模拟时间延迟，不改变寄存器、标志位或内存。';return;}
       if(op==='nop')return;
       if(op==='hlt'){this.status='halted';this.event.summary='遇到 hlt，教学模拟结束。';return;}
-      if(op==='cltq'){this.writeReg('rax',signed(this.readReg('eax'),32));return;}
-      if(op==='cwtl'){this.writeReg('eax',signed(this.readReg('ax'),16));return;}
+      if(op==='cltq'||op==='cwtl'){const src=op==='cltq'?'eax':'ax',dst=op==='cltq'?'rax':'eax';this.writeReg(dst,signed(this.readReg(src),regs[src].bits));this.transfer(this.dataLocation({kind:'reg',reg:src},ins),this.dataLocation({kind:'reg',reg:dst},ins),'sign');return;}
       if(op==='cqto'||op==='cltd'){const b=op==='cqto'?64:32;this.writeReg(b===64?'rdx':'edx',signed(this.readReg(b===64?'rax':'eax'),b)<0n?mask(b):0n);return;}
       if(['add','sub','cmp','and','or','xor','test'].includes(op)) {
         const src=read(a[0]),dst=read(a[1]);let result;

@@ -1,5 +1,5 @@
-const CACHE='stacklens-v0.5.1-function-pointers';
-const ASSETS=['./','./index.html',...['style.css','runtime.js','decoder.js','stack.js','engine.js','watch.js','execution.js','architectures.js','examples.js','app.js','icon.svg','manifest.webmanifest'].map(file=>'./'+file+'?v=0.5.1')];
+const CACHE='stacklens-v0.6.0-variable-transfers';
+const ASSETS=['./','./index.html',...['style.css','runtime.js','decoder.js','stack.js','engine.js','watch.js','execution.js','architectures.js','examples.js','app.js','icon.svg','manifest.webmanifest'].map(file=>'./'+file+'?v=0.6.0')];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)));self.skipWaiting();});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('stacklens-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));});
 self.addEventListener('fetch',event=>{

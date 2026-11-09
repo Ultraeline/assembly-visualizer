@@ -71,6 +71,66 @@
       return {available:true,location,address:address===null?null:E.hex(address),display,raw,key:location+':'+raw};
     }catch(error){return {available:false,location,address:address===null?null:E.hex(address),display:'暂不可读',error:error.message,raw:'',key:location+':'+error.message};}
   }
+  // Storage identity, never value equality, establishes a data-flow relationship.
+  const COPY_LIMIT=256;
+  function overlap(a,b){return a.kind===b.kind&&a.name===b.name&&a.start<b.start+BigInt(b.size)&&b.start<a.start+BigInt(a.size);}
+  function locationKey(at){return [at.kind,at.name||'',at.start,at.size].join(':');}
+  function bindingLocation(item){
+    if(!item.current.available)return null;
+    if(item.def.kind==='memory')return {kind:'mem',start:BigInt(item.current.address),size:item.def.size};
+    const r=E.regs[item.def.expression];return {kind:'reg',name:r.name,start:BigInt(r.shift/8),size:r.bits/8};
+  }
+  function writtenLocation(w){
+    if(w.kind==='mem')return {kind:'mem',start:w.address,size:w.bits/8};
+    const r=E.regs[w.name];return {kind:'reg',name:r.name,start:BigInt(r.shift/8),size:r.bits===32?8:r.bits/8};
+  }
+  function copyKey(c){return [locationKey(c.at),c.offset,c.originSize,c.raw,c.location,c.extension].join('|');}
+  function copyThrough(c,t){
+    if(!overlap(c.at,t.from))return null;
+    const start=c.at.start>t.from.start?c.at.start:t.from.start;
+    const end=c.at.start+BigInt(c.at.size)<t.from.start+BigInt(t.from.size)?c.at.start+BigInt(c.at.size):t.from.start+BigInt(t.from.size);
+    const size=Number(end-start),delta=Number(start-c.at.start),targetDelta=Number(start-t.from.start);
+    // An extension represents a transformed whole value, not extra source bytes.
+    if(c.extension&&(delta!==0||size!==c.at.size))return null;
+    let extension=c.extension,atSize=size;
+    if(t.extension&&size===t.from.size){extension=extension?extension+','+t.extension:t.extension;atSize=t.to.size;}
+    return {...c,at:{...t.to,start:t.to.start+BigInt(targetDelta),size:atSize},offset:c.offset+delta,originSize:c.extension?c.originSize:size,extension};
+  }
+  function advanceCopies(item,event,machine){
+    const writes=(event?.writes||[]).map(writtenLocation),before=item.copies;
+    const history=machine.history.at(-1);
+    const invalidMemory=at=>{
+      if(at.kind!=='mem'||!history)return false;
+      for(let i=0;i<at.size;i++){
+        const address=at.start+BigInt(i),region=machine.regionAt(address);
+        if(history.changes.has(address)||!region||region.readable===false||!history.snapshot.regions.includes(region))return true;
+      }
+      return false;
+    };
+    let next=before.filter(c=>!writes.some(w=>overlap(c.at,w))&&!invalidMemory(c.at));
+    const at=bindingLocation(item),sources=at?[{at,offset:0,originSize:item.def.size,raw:item.current.raw,location:item.current.location,extension:''},...before]:before;
+    for(const transfer of event?.transfers||[]){
+      const added=new Set();
+      for(const source of sources){
+        const copy=copyThrough(source,transfer);if(!copy)continue;
+        const key=locationKey(copy.at);
+        // A fresh read of the watched storage takes precedence over an older copy there.
+        if(added.has(key))continue;added.add(key);next.push(copy);
+      }
+    }
+    next=[...new Map(next.map(c=>[copyKey(c),c])).values()].slice(-COPY_LIMIT);
+    return next.length===before.length&&next.every((c,i)=>copyKey(c)===copyKey(before[i]))?before:next;
+  }
+  function registerView(item,c,registers){
+    const at=c.at,r=Object.entries(E.regs).find(([,r])=>r.name===at.name&&BigInt(r.shift/8)===at.start&&r.bits/8===at.size);
+    const register=r?r[0].toUpperCase():at.name.toUpperCase()+'['+Number(at.start)*8+':'+(Number(at.start)+at.size)*8+']';
+    const label=item.def.name+(c.offset===0&&c.originSize===item.def.size?'':'['+c.offset+':'+(c.offset+c.originSize)+']');
+    const slice=raw=>raw.split(' ').slice(c.offset,c.offset+c.originSize).join(' ');
+    const value=E.hex(BigInt.asUintN(at.size*8,registers[at.name]>>(at.start*8n)),at.size*2);
+    return {id:item.def.id,fullName:at.name,register,label,value,extension:c.extension,stale:!item.current.available||item.current.location!==c.location||slice(item.current.raw)!==slice(c.raw),at};
+  }
+  function registerViews(item,registers){return item.copies.filter(c=>c.at.kind==='reg').map(c=>registerView(item,c,registers));}
+  const viewKey=views=>views.map(v=>[v.register,v.label,v.value,v.extension,v.stale].join(':')).sort().join('|');
   class Tracker{
     constructor(machine,definitions=[]){
       if(!Array.isArray(definitions)||definitions.length>MAX_WATCHES)throw new Error('最多添加 '+MAX_WATCHES+' 个变量监视');
@@ -92,33 +152,45 @@
       if(!/^[a-zA-Z0-9_-]{1,80}$/.test(def.id)||this.items.some(item=>item.def.id===def.id)){
         do{def.id='watch-'+(++this.serial);}while(this.items.some(item=>item.def.id===def.id));
       }
-      const item={def,current:sample(this.machine,def),records:[],startStep:this.machine.steps};
+      const item={def,current:sample(this.machine,def),records:[],startStep:this.machine.steps,copies:[],copyHistory:[]};
       this.items.push(item);return item;
     }
     update(id,value){
       const item=this.items.find(x=>x.def.id===id);if(!item)throw new Error('变量已移除');
       const def=this.prepare({...value,id});
       const binding=d=>JSON.stringify({...d,name:''});
-      if(binding(def)!==binding(item.def)){item.records=[];item.startStep=this.machine.steps;item.current=sample(this.machine,def);}
+      if(binding(def)!==binding(item.def)){item.records=[];item.startStep=this.machine.steps;item.current=sample(this.machine,def);item.copies=[];item.copyHistory=[];}
       item.def=def;return item;
     }
     remove(id){this.items=this.items.filter(x=>x.def.id!==id);}
     definitions(){return this.items.map(x=>({...x.def}));}
+    registerCopies(id){
+      return this.items.filter(item=>!id||item.def.id===id).flatMap(item=>{
+        const copies=registerViews(item,this.machine.regs),at=bindingLocation(item);
+        if(item.def.kind==='register'&&at){
+          const direct=registerView(item,{at,offset:0,originSize:item.def.size,raw:item.current.raw,location:item.current.location,extension:''},this.machine.regs);
+          direct.bound=true;copies.unshift(direct);
+        }
+        const seen=new Set();
+        return copies.filter(c=>{const key=c.register+'|'+c.label;if(seen.has(key))return false;seen.add(key);return true;});
+      });
+    }
     capture(){
       const m=this.machine;
       // Faulting instructions roll back atomically and do not create a new step.
       if(m.status==='fault')return;
       for(const item of this.items){
-        const next=sample(m,item.def);
-        if(next.key!==item.current.key){
-          item.records.push({step:m.steps,instruction:m.lastEvent?.instruction||'',address:m.lastEvent?.address===undefined?'':E.hex(m.lastEvent.address),before:item.current,after:next});
+        const before=item.current,copyBefore=registerViews(item,m.history.at(-1)?.snapshot.regs||m.regs),next=sample(m,item.def),copies=advanceCopies(item,m.lastEvent,m);
+        if(copies!==item.copies){item.copies=copies;item.copyHistory.push({step:m.steps,copies});if(item.copyHistory.length>2001)item.copyHistory.shift();}
+        item.current=next;const copyAfter=registerViews(item,m.regs);
+        if(next.key!==before.key||viewKey(copyBefore)!==viewKey(copyAfter)){
+          item.records.push({step:m.steps,instruction:m.lastEvent?.instruction||'',address:m.lastEvent?.address===undefined?'':E.hex(m.lastEvent.address),before,after:next,copyBefore,copyAfter});
           if(item.records.length>LIMIT)item.records.shift();
         }
-        item.current=next;
       }
     }
     rewind(){
-      for(const item of this.items){item.records=item.records.filter(r=>r.step<=this.machine.steps);item.startStep=Math.min(item.startStep,this.machine.steps);item.current=sample(this.machine,item.def);}
+      for(const item of this.items){item.records=item.records.filter(r=>r.step<=this.machine.steps);item.startStep=Math.min(item.startStep,this.machine.steps);item.current=sample(this.machine,item.def);item.copyHistory=item.copyHistory.filter(r=>r.step<=this.machine.steps);item.copies=item.copyHistory.at(-1)?.copies||[];}
     }
   }
   const api={Tracker,normalize,sample,resolve,formats,LIMIT,MAX_WATCHES};
