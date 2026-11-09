@@ -99,13 +99,15 @@
       const frameReturn=machine.frames.find(f=>f.returnSlot!==null&&f.returnSlot>=addr&&f.returnSlot<addr+8n),frameBase=machine.frames.find(f=>f.base!==null&&f.base>=addr&&f.base<addr+8n);
       const buffer=machine.buffers.find(b=>b.active&&addr<b.end&&addr+8n>b.start);
       const owner=[...machine.frames].reverse().find(f=>{const index=machine.frames.indexOf(f),lower=index===machine.frames.length-1?machine.regs.rsp:machine.frames[index+1].stackEntry+8n;return addr>=lower&&addr<f.stackEntry;});
-      if(frameReturn){meaning='返回地址 · '+frameReturn.name;sub=frameReturn.returnAddress===machine.sentinel?'教学入口':E.hex(value);}
+      if(frameReturn){meaning='返回地址 · '+frameReturn.name;sub=frameReturn.returnAddress===machine.sentinel&&value===machine.sentinel?'教学入口':E.hex(value);}
       else if(frameBase){meaning='保存的 RBP（推断）';sub=E.hex(value);}
       else if(buffer){meaning=buffer.name+' · '+Number(buffer.end-buffer.start)+' B';sub=bytes.map(v=>v>=32&&v<=126?String.fromCharCode(v):'·').join('');}
       else if(bytes.every(x=>x!==null)){sub=E.hex(value);if(owner)meaning=owner.name+' · 栈帧';}
       const initial=machine.runtime.initialStack;
       if(initial&&addr===initial.argv-8n)meaning='进程入口 · argc';
       else if(initial&&addr>=initial.argv&&addr<initial.argv+initial.argc*8n)meaning='进程入口 · argv['+((addr-initial.argv)/8n)+']';
+      const functionPointer=machine.functionPointerAt(addr),functionLabel=functionPointer?'函数入口 · '+functionPointer.names.join(' / '):'';
+      if(functionPointer)sub=E.hex(functionPointer.value);
       const cells=bytes.map((v,i)=>{const a=addr+BigInt(i),key=a.toString();let cls='memory-byte';
         if(v===null)cls+=' unmapped';
         if(machine.buffers.some(b=>b.active&&a>=b.start&&a<b.end))cls+=' buffer-byte';
@@ -115,7 +117,7 @@
         return `<span class="${cls}" title="${E.hex(a)}${v===null?' · 未映射':' · '+v}">${v===null?'—':v.toString(16).padStart(2,'0')}</span>`;
       }).join('');
       const ptr=(isRsp?'<span class="pointer-label">RSP'+(machine.regs.rsp===addr?'':'+'+(machine.regs.rsp-addr))+'</span>':'')+(isRbp?'<span class="pointer-label rbp">RBP'+(machine.regs.rbp===addr?'':'+'+(machine.regs.rbp-addr))+'</span>':'');
-      html+=`<tr class="${isRsp?'at-rsp':''} ${isRbp?'at-rbp':''} ${owner?'frame-owned':''}"><td class="memory-address">${addr.toString(16)}${ptr}</td><td><div class="memory-bytes">${cells}</div></td><td class="memory-meaning" title="${esc(meaning+' '+sub)}">${meaning?`<span class="memory-label">${esc(meaning)}</span>`:''}${esc(sub)}</td></tr>`;
+      html+=`<tr class="${isRsp?'at-rsp':''} ${isRbp?'at-rbp':''} ${owner?'frame-owned':''}"><td class="memory-address">${addr.toString(16)}${ptr}</td><td><div class="memory-bytes">${cells}</div></td><td class="memory-meaning" title="${esc([meaning,functionLabel,sub].filter(Boolean).join(' · '))}">${meaning?`<span class="memory-label">${esc(meaning)}</span>`:''}${functionLabel?`<span class="memory-function">${esc(functionLabel)}</span>`:''}${esc(sub)}</td></tr>`;
     }
     $('memory-body').innerHTML=html;if(document.activeElement!==$('memory-address'))$('memory-address').value=E.hex(memoryAnchor);
     $('frames').innerHTML=machine.frames.length?machine.frames.map((f,i)=>`<button class="frame ${i===machine.frames.length-1?'active':''}" data-frame="${f.stackEntry}" title="查看 ${esc(f.name)} 的入口栈地址"><small>${String(i).padStart(2,'0')}</small>${esc(f.name)}</button>`).join(''):'<span class="frames-empty">已返回所有跟踪的调用</span>';

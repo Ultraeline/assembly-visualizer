@@ -259,7 +259,7 @@
     }flush();return bytes;
   }
   function compile(source,options={}) {
-    const symbols={},instructions=[],data=[],annotations=[],warnings=[];
+    const symbols={},instructions=[],data=[],annotations=[],warnings=[],declaredFunctions=new Set(),headerFunctions=new Set();
     let pc=expression(options.codeBase||'0x400000'),dp=expression(options.dataBase||'0x600000'),section='text',pending=[],mode=null;
     const startPc=pc,startData=dp;
     source.replace(/\r/g,'').split('\n').forEach((raw,index)=>{
@@ -272,7 +272,7 @@
         text=text.trim();if(!text)return;
         if(/^Disassembly of section |^.+:\s+file format /.test(text))return;
         const header=text.match(/^([\da-f]+)\s+<([^>]+)>:$/i);
-        if(header) {if(mode==='source')fail('请分别导入源代码和反汇编文本');mode='disassembly';pc=BigInt('0x'+header[1]);symbols[header[2]]=pc;return;}
+        if(header) {if(mode==='source')fail('请分别导入源代码和反汇编文本');mode='disassembly';pc=BigInt('0x'+header[1]);symbols[header[2]]=pc;if(!header[2].startsWith('.')&&!/[+-]0x[\da-f]+$/i.test(header[2]))headerFunctions.add(header[2]);return;}
         const row=text.match(/^([\da-f]+):\s*(?=[\da-f]{2}(?:\s|$))(.*)$/i);
         if(row) {
           if(mode==='source')fail('请分别导入源代码和反汇编文本');mode='disassembly';
@@ -291,7 +291,8 @@
           const dm=text.match(/^(\S+)(?:\s+(.*))?$/),d=dm[1],arg=dm[2]||'';
           if(['.text','.data','.rodata','.bss'].includes(d)){section=d==='.text'?'text':'data';return;}
           if(d==='.section'){const s=arg.split(',')[0].trim();if(!['.text','.data','.rodata','.bss'].includes(s))fail('暂不支持节：'+s);section=s==='.text'?'text':'data';return;}
-          if(['.global','.globl','.type','.size','.file','.ident','.att_syntax','.code64'].includes(d)||d.startsWith('.cfi_'))return;
+          if(d==='.type'){const fn=arg.match(/^([A-Za-z_.$][\w.$]*)\s*,\s*[@%]?function\s*$/i);if(fn)declaredFunctions.add(fn[1]);return;}
+          if(['.global','.globl','.size','.file','.ident','.att_syntax','.code64'].includes(d)||d.startsWith('.cfi_'))return;
           if(section==='text')fail('暂不支持代码节指示：'+d);
           let bytes=null,values=null,width=0;
           if(['.ascii','.asciz','.string'].includes(d))bytes=split(arg).flatMap(s=>[...unquote(s),...(d==='.ascii'?[]:[0])]);
@@ -322,7 +323,17 @@
     const map=new Map(),occupied=new Set();
     for(const ins of instructions){if(ins.length>15)fail('x86 指令长度不能超过 15 字节');for(let i=0;i<ins.length;i++){const key=(ins.address+BigInt(i)).toString();if(occupied.has(key))fail('指令地址重叠：'+hex(ins.address));occupied.add(key);}map.set(ins.address,ins);}
     if(mode==='disassembly')warnings.push('反汇编按所提供的指令文本执行，机器码用于保留地址、长度和显示；本版不校验文本与机器码是否一致。缺失的数据与外部代码需要另行配置。');
-    return {source,mode:mode||'source',instructions,map,symbols,data,externalMap,warnings,codeBase:startPc,dataBase:startData};
+    const functionEntries=new Map(),addFunction=(name,address)=>{
+      if(!map.has(address))return;
+      const names=functionEntries.get(address)||[];if(!names.includes(name))functionEntries.set(address,[...names,name]);
+    };
+    for(const name of [...headerFunctions,...declaredFunctions,'main','_start'])if(Object.hasOwn(symbols,name))addFunction(name,symbols[name]);
+    const labelsByAddress=new Map();for(const [name,address]of Object.entries(symbols)){if(!labelsByAddress.has(address))labelsByAddress.set(address,[]);labelsByAddress.get(address).push(name);}
+    for(const ins of instructions)if(ins.op==='call'&&ins.args[0].kind==='target'){
+      const address=expression(ins.args[0].expr,symbols);
+      for(const name of labelsByAddress.get(address)||[])if(!/[+-]0x[\da-f]+$/i.test(name))addFunction(name,address);
+    }
+    return {source,mode:mode||'source',instructions,map,symbols,data,externalMap,functionEntries,warnings,codeBase:startPc,dataBase:startData};
   }
   class Machine {
     constructor(program,config={}) {
@@ -335,6 +346,8 @@
       if(!Number.isSafeInteger(stackSize)||stackSize<256||stackSize>1048576)fail('栈空间需要 256..1048576 字节');
       this.stackTop=stackTop;this.addRegion(stackTop-BigInt(stackSize)+256n,stackSize,'栈',true);
       Runtime.loadImage(this);
+      this.functionEntries=new Map(program.functionEntries);
+      for(const [name,address]of this.elf?.functionSymbols||[]){const aliases=this.functionEntries.get(address)||[];if(!aliases.includes(name))this.functionEntries.set(address,[...aliases,name]);}
       if(!this.elf){
         for(const ins of program.instructions) {this.addRegion(ins.address,ins.length,'代码',false);ins.bytes.forEach((b,i)=>this.memory.set(ins.address+BigInt(i),b));}
         for(const item of program.data){if(item.bytes.length)this.addRegion(item.address,item.bytes.length,'数据',true);item.bytes.forEach((b,i)=>this.memory.set(item.address+BigInt(i),b));}
@@ -355,6 +368,16 @@
       this.regions.push({start,end,name,writable});
     }
     nameAt(address){return Object.entries(this.program.symbols).find(([name,value])=>value===address&&!name.startsWith('.'))?.[0]||hex(address);}
+    functionNamesAt(address){
+      const names=this.functionEntries.get(address);if(names?.length)return [...names];
+      const external=this.externalMap.get(address);return external&&!external.startsWith('[')?[external]:[];
+    }
+    functionPointerAt(address){
+      let value=0n;
+      // Inspect a complete little-endian pointer without CPU reads or mapping growth.
+      for(let i=7;i>=0;i--){const at=address+BigInt(i),region=this.regionAt(at);if(!region||region.readable===false)return null;value=(value<<8n)|BigInt(this.memory.get(at)??0);}
+      const names=this.functionNamesAt(value);return names.length?{value,names}:null;
+    }
     regionAt(address){return this.regions.find(r=>address>=r.start&&address<r.end);}
     checkMemory(address,size,write=false) {
       for(let i=0;i<size;i++){const a=address+BigInt(i),r=this.regionAt(a)||Runtime.grow(this,a);if(!r)fail('未映射的内存：'+hex(a)+'。请检查地址或配置内存区域。');if(write&&!r.writable)fail('写入只读代码区域：'+hex(a));if(!write&&r.readable===false)fail('读取不可读的映射：'+hex(a));}

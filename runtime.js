@@ -34,11 +34,11 @@
     const str=(s,n)=>{if(!s||s.type!==3||n>=s.size)fail('ELF 字符串索引无效');let end=s.offset+n;while(end<s.offset+s.size&&bytes[end])end++;if(end===s.offset+s.size)fail('ELF 字符串缺少结束符');return decoder.decode(bytes.slice(s.offset+n,end));};
     if(shnum&&!sections[shstr])fail('ELF 节名表缺失');
     for(const s of sections)s.name=str(sections[shstr],s.nameOffset);
-    const symbolTables=new Map(),symbols={};
+    const symbolTables=new Map(),symbols={},functionSymbols=new Map();
     for(const [index,s]of sections.entries())if([2,11].includes(s.type)){
       if(s.entsize!==24||s.size%24)fail('ELF 符号表尺寸无效');const table=[];
       for(let p=s.offset;p<s.offset+s.size;p+=24){const name=str(sections[s.link],u32(p)),address=u64(p+8),size=number(u64(p+16)),defined=u16(p+6)!==0,weak=(bytes[p+4]>>4)===2;
-        table.push({name,address,size,defined,weak});if(name&&defined)symbols[name]=address;}
+        table.push({name,address,size,defined,weak});if(name&&defined){symbols[name]=address;if((bytes[p+4]&15)===2&&segments.some(seg=>seg.executable&&address>=seg.address&&address<seg.address+BigInt(seg.size)))functionSymbols.set(name,address);}}
       symbolTables.set(index,table);
     }
     const relocations=[],dynamic={};
@@ -48,7 +48,7 @@
       if(s.type===6){if(s.entsize!==16||s.size%16)fail('ELF 动态表尺寸无效');for(let p=s.offset;p<s.offset+s.size;p+=16){const tag=u64(p);if(!tag)break;dynamic[tag.toString()]=u64(p+8);}}
     }
     if(!shnum)fail('当前 ELF 装载需要节表以读取动态符号与重定位');
-    return {entry,segments,symbols,relocations,dynamic,phdr,phnum,phsize,name:String(value.name||'program')};
+    return {entry,segments,symbols,functionSymbols,relocations,dynamic,phdr,phnum,phsize,name:String(value.name||'program')};
   }
   function loadImage(m){
     m.externalMap=new Map(m.program.externalMap);if(!m.config.image)return;

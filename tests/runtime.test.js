@@ -150,3 +150,11 @@ test('ELF rejects truncated, mismatched, wrong-architecture, PIE and unsupported
   const relocation=Buffer.from(f.bytes);relocation.writeUInt32LE(999,0x2b08);assert.throws(()=>new E.Machine(f.program,{image:R.image(relocation)}),/重定位类型 999/);
   const serialized=JSON.parse(JSON.stringify(f.image));assert.equal(new E.Machine(f.program,{image:serialized}).rip,f.program.symbols._start);
 });
+
+test('ELF function symbols name exact executable entries while object and non-code symbols do not',()=>{
+ const f=fixture(),bytes=Buffer.from(f.bytes);
+ bytes.write('hidden_fn\0',0x2901);bytes[0x2a1c]=18;bytes.writeUInt16LE(1,0x2a1e);bytes.writeBigUInt64LE(f.program.symbols.init,0x2a20);
+ const image=R.image(bytes),parsed=R.parseELF(image);assert.equal(parsed.functionSymbols.get('hidden_fn'),f.program.symbols.init);assert.equal(parsed.functionSymbols.has('stdin'),false);
+ const m=new E.Machine(f.program,{image});assert.deepEqual(m.functionNamesAt(f.program.symbols.init),['hidden_fn']);assert.deepEqual(m.functionNamesAt(f.program.symbols.stdin_slot),[]);
+ bytes.writeBigUInt64LE(f.program.symbols.stdin_slot,0x2a20);assert.equal(R.parseELF(R.image(bytes)).functionSymbols.has('hidden_fn'),false);
+});
