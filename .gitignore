@@ -1,0 +1,10 @@
+dist/
+*.zip
+*.tar.gz
+node_modules/
+.DS_Store
+
+# Local hosting configuration and personal experiments
+.openai/
+.debug/
+*.stacklens.json
