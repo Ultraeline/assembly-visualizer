@@ -81,8 +81,8 @@
     const ids=[...new Set(kind==='variable'?[extra.id]:args.flatMap(n=>n.ids))];
     const count=1+args.reduce((n,a)=>n+a.count,0),depth=1+Math.max(0,...args.map(a=>a.depth));
     // Ownership follows the value being changed; dependencies also include read-only inputs.
-    const owners=kind==='variable'?[extra.id]:['deref','compose'].includes(kind)?ids:args[0]?.owners||[];
-    const common={key:++formulaSerial,bits,value:BigInt.asUintN(bits,value),ids,owners,step,calculated:['binary','unary','deref'].includes(kind)||args.some(a=>a.calculated)};
+    const owners=kind==='variable'?[extra.id]:['deref','compose'].includes(kind)?ids:kind==='address'&&!args[0]?.owners.length?ids:args[0]?.owners||[];
+    const common={key:++formulaSerial,bits,value:BigInt.asUintN(bits,value),ids,owners,step,calculated:['binary','unary','deref','address'].includes(kind)||args.some(a=>a.calculated)};
     if(count>FORMULA_NODES||depth>FORMULA_DEPTH){
       const refs=[...new Map(args.flatMap(leaves).map(n=>[n.id,n])).values()];
       return {...common,kind:'summary',args:[],refs,step,count:1,depth:1,calculated:true};
@@ -95,6 +95,8 @@
   }
   function sliceFormula(node,offset,size){
     if(!offset&&size*8===node.bits)return node;
+    // Reading original low bits cancels a preceding extension exactly.
+    if(node.kind==='cast'&&(offset+size)*8<=node.args[0].bits)return sliceFormula(node.args[0],offset,size);
     const value=node.value>>BigInt(offset*8);
     if(node.kind==='variable')return formulaNode('variable',size*8,value,[],{id:node.id,name:node.name,offset:node.offset+offset,size,totalSize:node.totalSize,raw:node.raw.split(' ').slice(offset,offset+size).join(' '),location:node.location});
     return formulaNode('slice',size*8,value,[node],{offset});
@@ -103,8 +105,9 @@
   const operator={add:['+',4],sub:['−',4],imul:['×',5],and:['&',3],xor:['^',2],or:['|',1]};
   function formatFormula(node,items,parent=0){
     if(node.kind==='variable'){const name=items.find(i=>i.def.id===node.id)?.def.name||node.name||'已移除变量';return name+(node.offset===0&&node.size===node.totalSize?'':'['+node.offset+':'+(node.offset+node.size)+']');}
-    if(node.kind==='constant'){const value=BigInt.asIntN(node.bits,node.value).toString();return value.startsWith('-')&&parent?'('+value+')':value;}
+    if(node.kind==='constant'){if(node.radix===16)return E.hex(node.value);const value=BigInt.asIntN(node.bits,node.value).toString();return value.startsWith('-')&&parent?'('+value+')':value;}
     if(node.kind==='summary')return '阶段值@'+node.step;
+    if(node.kind==='address')return formatFormula(node.args[0],items,parent);
     if(node.kind==='deref'){const child=node.args[0];return '*'+(child.kind==='variable'?formatFormula(child,items):'('+formatFormula(child,items)+')');}
     if(node.kind==='cast')return (node.mode==='sign'?'符号扩展':'零扩展')+node.bits+'('+formatFormula(node.args[0],items)+')';
     if(node.kind==='compose')return '拼接'+node.bits+'('+node.args.map((arg,i)=>'位['+node.offsets[i]*8+':'+(node.offsets[i]*8+arg.bits)+']='+ (arg.kind==='constant'?E.hex(arg.value,arg.bits/4):formatFormula(arg,items))).reverse().join('，')+')';
@@ -192,8 +195,8 @@
     }
     return partialOperandFormula(operand,bits,candidates,step)||constant();
   }
-  function dereferenceFormula(at,value,items,step=0){
-    if(at.kind!=='mem'||!at.pointer||value===undefined)return null;
+  function addressFormula(at,items,step=0,hexDisplacement=false){
+    if(!at.pointer)return null;
     const p=at.pointer;let address=null;
     if(p.base)address=operandFormula(p.base,64,items,step);
     if(p.index){
@@ -202,7 +205,12 @@
       address=address?formulaNode('binary',64,address.value+index.value,[address,index],{op:'add'},step):index;
     }
     if(!address?.ids.length)return null;
-    if(p.displacement){const negative=p.displacement<0n,displacement=negative?-p.displacement:p.displacement;address=formulaNode('binary',64,at.start,[address,formulaNode('constant',64,displacement)],{op:negative?'sub':'add'},step);}
+    if(p.displacement){const negative=p.displacement<0n,displacement=negative?-p.displacement:p.displacement;address=formulaNode('binary',64,at.start,[address,formulaNode('constant',64,displacement,[],{radix:hexDisplacement?16:10})],{op:negative?'sub':'add'},step);}
+    return address;
+  }
+  function dereferenceFormula(at,value,items,step=0){
+    if(at.kind!=='mem'||value===undefined)return null;
+    const address=addressFormula(at,items,step);if(!address)return null;
     return formulaNode('deref',at.size*8,value,[address],{address:at.start},step);
   }
   function dereferencesFor(event,items){
@@ -215,7 +223,15 @@
   }
   function calculationsFor(event,items,step){
     if(!items.length)return [];
-    return (event?.calculations||[]).map(calc=>{
+    return (event?.calculations||[]).flatMap(calc=>{
+      if(calc.op==='lea'){
+        const address=addressFormula(calc.address,items,step,true);if(!address)return [];
+        let formula=formulaNode('address',64,calc.address.start,[address],{},step);
+        if(calc.bits<64)formula=sliceFormula(formula,0,calc.bits/8);
+        const before=operandFormula(calc.operands[0],calc.bits,items,step);
+        const operation={op:'lea',at:calc.to,bits:calc.bits,before,source:null,after:formula,owners:formula.ids,ids:formula.ids};
+        return [{at:calc.to,formula,operation,offset:0,originSize:calc.bits/8,raw:'',location:'',extension:'',zeroUpper:calc.bits===32}];
+      }
       const args=calc.operands.map(operand=>operandFormula(operand,calc.bits,items,step));
       const formula=formulaNode(args.length===1?'unary':'binary',calc.bits,calc.result,args,{op:calc.op},step);
       const inPlace=calc.to.kind==='reg'&&calc.operands[0].at&&locationKey(calc.to)===locationKey(calc.operands[0].at);
@@ -303,7 +319,7 @@
       const {op,bits,before,source,after}=operation,target=registerName(operation.at),label=source?formatFormula(source,this.items):'';
       const actions={add:'中加了 ',sub:'中减去了 ',imul:'中的值乘以 ',and:'中的值按位与 ',or:'中的值按位或 ',xor:'中的值按位异或 ',neg:'中的值取负',not:'中的值按位取反'};
       const display=node=>format==='signed'?BigInt.asIntN(bits,node.value).toString():format==='unsigned'?BigInt.asUintN(bits,node.value).toString():E.hex(node.value,bits/4);
-      return {summary:target+' '+actions[op]+label,target,bits,before:display(before),after:display(after),beforeExpression:formatFormula(before,this.items),afterExpression:formatFormula(after,this.items)};
+      return {summary:op==='lea'?target+' 写入 LEA 计算结果':target+' '+actions[op]+label,target,bits,before:display(before),after:display(after),beforeExpression:formatFormula(before,this.items),afterExpression:formatFormula(after,this.items)};
     }
     latestOperation(id){
       const item=this.items.find(i=>i.def.id===id);if(!item)return null;

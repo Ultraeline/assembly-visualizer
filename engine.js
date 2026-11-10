@@ -533,7 +533,13 @@
         this.transfer(firstLocation,secondLocation);this.transfer(secondLocation,firstLocation);
         this.event.summary='交换两个操作数的值，标志位保持不变。';return;
       }
-      if(op==='lea'){const v=this.address(a[0],ins),buffer=[...this.buffers].reverse().find(b=>b.active&&v>=b.start&&v<b.end);write(a[1],v,buffer?.id||null);return;}
+      if(op==='lea'){
+        // Capture address components before the destination can overwrite a base or index.
+        const address=this.dataLocation(a[0],ins),to=this.dataLocation(a[1],ins),before=operand(a[1],this.readReg(a[1].reg,false));
+        const v=this.address(a[0],ins),buffer=[...this.buffers].reverse().find(b=>b.active&&v>=b.start&&v<b.end);
+        write(a[1],v,buffer?.id||null);
+        this.event.calculations.push({op,to,operands:[before],address,bits,result:uint(v,bits)});return;
+      }
       if(op==='push'){const from=this.dataLocation(a[0],ins);this.push(read(a[0]),bits);this.transfer(from,{kind:'mem',start:this.regs.rsp,size:bits/8});return;}
       if(op==='pop'){const from={kind:'mem',start:this.regs.rsp,size:bits/8},v=this.pop(bits),to=this.dataLocation(a[0],ins);write(a[0],v);this.transfer(from,to);return;}
       if(op==='call') {

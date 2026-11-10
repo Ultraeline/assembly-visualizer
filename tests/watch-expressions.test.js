@@ -109,7 +109,7 @@ test('sign-extending pointer loads carry dereference and their actual source wid
 });
 test('storing through a pointer is not a dereference result; LEA and untracked pointers do not invent one',()=>{
  const {run,view}=setup('movq x,%rax\nmovq $8,(%rax)\nleaq 8(%rax),%rbx',[memory('x')],pointerData);run();
- assert.equal(view('RBX'),undefined);
+ assert.equal(view('RBX').label,'x + 0x8');assert.doesNotMatch(view('RBX').inputs,/位读取/);
  const unknown=setup('leaq target,%rax\nmovq (%rax),%rbx',[memory('y')],pointerData);unknown.run();assert.equal(unknown.view('RBX'),undefined);
 });
 test('a fresh indirect load replaces previous pointee derivations, while existing register snapshots keep old values',()=>{
