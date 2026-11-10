@@ -398,10 +398,24 @@
     }
     dataLocation(op,ins,bits=ins.bits) {
       if(op.kind==='reg'){const r=regs[op.reg];return {kind:'reg',name:r.name,start:BigInt(r.shift/8),size:r.bits/8};}
-      if(op.kind==='mem')return {kind:'mem',start:this.address(op,ins,false),size:bits/8};
+      if(op.kind==='mem'){
+        const start=this.address(op,ins,false),pointer={scale:op.scale||1};let registers=0n;
+        for(const key of ['base','index'])if(op[key]&&op[key]!=='rip'){
+          const value=this.readReg(op[key],false);pointer[key]={at:this.dataLocation({kind:'reg',reg:op[key]},ins),value};
+          registers+=value*BigInt(key==='index'?pointer.scale:1);
+        }
+        pointer.displacement=signed(start-registers,64);
+        return {kind:'mem',start,size:bits/8,pointer};
+      }
       return null;
     }
-    transfer(from,to,extension='') {if(from&&to)this.event.transfers.push({from,to,extension});}
+    transfer(from,to,extension='') {
+      if(from&&to){
+        if(from.kind==='mem'){const read=this.event.reads.find(r=>r.kind==='mem'&&r.address===from.start&&r.bits===from.size*8);from={...from,value:read?.value};}
+        this.event.transfers.push({from,to,extension});
+      }
+    }
+    calculation(op,to,operands,bits,result) {this.event.calculations.push({op,to,operands,bits,result:uint(result,bits)});}
     readMemory(address,bits) {this.checkMemory(address,bits/8);let v=0n;for(let i=bits/8-1;i>=0;i--)v=(v<<8n)|BigInt(this.memory.get(address+BigInt(i))??0);if(this.event)this.event.reads.push({kind:'mem',address,bits,value:v});return v;}
     writeMemory(address,bits,value,pointer=null) {
       const size=bits/8;this.checkMemory(address,size,true);const before=this.peek(address,size),after=bytesLE(value,size);
@@ -480,7 +494,7 @@
     step() {
       if(this.status!=='ready')return false;
       const snapshot=this.snapshot();this.changes=new Map();let ins=this.program.map.get(this.rip);const external=this.externalMap.get(this.rip);
-      this.event={step:this.steps+1,address:this.rip,instruction:ins?.text||external||'取指',reads:[],writes:[],transfers:[],warnings:[],summary:'',flagsBefore:{...this.flags}};
+      this.event={step:this.steps+1,address:this.rip,instruction:ins?.text||external||'取指',reads:[],writes:[],transfers:[],calculations:[],warnings:[],summary:'',flagsBefore:{...this.flags}};
       try {
         if(external&&!ins)this.model(external);
         else {
@@ -496,12 +510,13 @@
         this.lastEvent=this.event;
       }catch(e) {
         for(const [a,v]of this.changes){if(v===undefined)this.memory.delete(a);else this.memory.set(a,v);}this.restore(snapshot);
-        this.status='fault';this.error=e.message;this.lastEvent={...this.event,reads:[],writes:[],transfers:[],warnings:[],summary:e.message,fault:true};this.changes=new Map();
+        this.status='fault';this.error=e.message;this.lastEvent={...this.event,reads:[],writes:[],transfers:[],calculations:[],warnings:[],summary:e.message,fault:true};this.changes=new Map();
       }
       this.history.push({snapshot,changes:this.changes});if(this.history.length>2000)this.history.shift();this.event=null;this.changes=null;return true;
     }
     execute(ins) {
       const {op,args:a,bits}=ins;const read=(x,b=bits)=>this.read(x,ins,b),write=(x,v,p=null)=>this.write(x,ins,v,p);
+      const operand=(arg,value)=>({at:this.dataLocation(arg,ins),value:uint(value,bits)});
       if(['mov','movabs','movzx','movsx'].includes(op)) {
         const from=this.dataLocation(a[0],ins,ins.fromBits||bits),to=this.dataLocation(a[1],ins);
         let v=read(a[0],ins.fromBits||bits);if(op==='movsx')v=signed(v,ins.fromBits);write(a[1],v,this.pointer(a[0]));
@@ -540,12 +555,20 @@
         if(op==='add'){result=dst+src;this.arithmetic(dst,src,result,bits);}
         else if(op==='sub'||op==='cmp'){result=dst-src;this.arithmetic(dst,src,result,bits,true);}
         else {result=op==='or'?dst|src:op==='xor'?dst^src:dst&src;this.logic(result,bits);}
-        if(!['cmp','test'].includes(op))write(a[1],result,['add','sub'].includes(op)&&a[0].kind==='imm'?this.pointer(a[1]):null);return;
+        if(!['cmp','test'].includes(op)){
+          const to=this.dataLocation(a[1],ins),operands=[operand(a[1],dst),operand(a[0],src)];
+          write(a[1],result,['add','sub'].includes(op)&&a[0].kind==='imm'?this.pointer(a[1]):null);
+          // XOR/SUB of the very same register are constant-zero idioms.
+          if(!(['xor','sub'].includes(op)&&a[0].kind==='reg'&&a[0].reg===a[1].reg))this.calculation(op,to,operands,bits,result);
+        }return;
       }
       if(['inc','dec','neg','not'].includes(op)) {
         const v=read(a[0]),cf=this.flags.CF;let result=op==='inc'?v+1n:op==='dec'?v-1n:op==='neg'?-v:~v;
         if(op==='neg')this.arithmetic(0n,v,result,bits,true);else if(op!=='not'){this.arithmetic(v,1n,result,bits,op==='dec');this.flags.CF=cf;}
-        write(a[0],result,['inc','dec'].includes(op)?this.pointer(a[0]):null);return;
+        const to=this.dataLocation(a[0],ins),operands=[operand(a[0],v)];
+        if(op==='inc'||op==='dec')operands.push({at:null,value:1n});
+        write(a[0],result,['inc','dec'].includes(op)?this.pointer(a[0]):null);
+        this.calculation(op==='inc'?'add':op==='dec'?'sub':op,to,operands,bits,result);return;
       }
       if(['shl','shr','sar'].includes(op)) {
         const count=Number(read(a[0],a[0].kind==='reg'?8:bits)&BigInt(bits===64?63:31));if(!count)return;
@@ -554,7 +577,8 @@
         this.szp(result,bits);this.flags.OF=count===1?(op==='shl'?this.flags.SF!==this.flags.CF:op==='shr'?!!(v&(1n<<BigInt(bits-1))):false):null;this.flags.AF=null;write(a[1],result);return;
       }
       if(op==='imul'&&a.length>1) {
-        const x=signed(read(a[0]),bits),y=signed(read(a[1]),bits),r=x*y;write(a.at(-1),r);this.flags.CF=this.flags.OF=signed(uint(r,bits),bits)!==r;for(const f of ['ZF','SF','PF','AF'])this.flags[f]=null;return;
+        const x=signed(read(a[0]),bits),y=signed(read(a[1]),bits),r=x*y,to=this.dataLocation(a.at(-1),ins),operands=[operand(a[1],y),operand(a[0],x)];
+        write(a.at(-1),r);this.calculation('imul',to,operands,bits,r);this.flags.CF=this.flags.OF=signed(uint(r,bits),bits)!==r;for(const f of ['ZF','SF','PF','AF'])this.flags[f]=null;return;
       }
       if(['imul','mul','div','idiv'].includes(op)) {
         const low={8:'al',16:'ax',32:'eax',64:'rax'}[bits],high={8:'ah',16:'dx',32:'edx',64:'rdx'}[bits];let x=read(a[0]);

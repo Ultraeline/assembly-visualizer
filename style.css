@@ -372,6 +372,7 @@ main{margin:0;padding:20px 12px}
 .watch-copies b{font-weight:500;color:var(--accent)}
 .watch-copies code{font:10px/1.7 var(--mono);color:var(--ink)}
 .watch-copies p{margin:4px 0 0}
+.watch-expression-inputs{font-size:9px;line-height:1.8;color:var(--muted);overflow-wrap:anywhere}
 .watch-copy-change{padding-top:6px;line-height:1.9;color:var(--accent);overflow-wrap:anywhere}
 #watch-history{border-top:1px solid var(--line)}
 .watch-history-heading{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:13px 16px 8px;flex-wrap:wrap}

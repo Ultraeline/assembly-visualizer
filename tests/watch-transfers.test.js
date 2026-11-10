@@ -16,10 +16,10 @@ test('memory to register to register follows storage identity, not equal values'
  step();step();step();assert.deepEqual(copies().map(c=>c.register),['EAX','EDI']);
  assert.deepEqual(t.items[0].records.map(r=>r.step),[1,2]);
 });
-test('overwrites and arithmetic clear copies even when a numeric value stays equal',()=>{
+test('overwrites clear copies while supported arithmetic now records an expression',()=>{
  const {step,copies}=setup('movl value,%eax\nmovl %eax,%ebx\nmovl $42,%eax\naddl $0,%ebx');
  step();step();step();assert.deepEqual(copies().map(c=>c.register),['EBX']);
- step();assert.deepEqual(copies(),[]);
+ step();assert.equal(copies()[0].label,'count + 0');assert.equal(copies()[0].value,'0x0000002a');
 });
 test('memory changes leave a labeled old register copy with its actual value',()=>{
  const {t,step,copies}=setup('movl value,%eax\nmovl $99,value\nmovl %eax,%ebx');
