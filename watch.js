@@ -81,7 +81,7 @@
     const ids=[...new Set(kind==='variable'?[extra.id]:args.flatMap(n=>n.ids))];
     const count=1+args.reduce((n,a)=>n+a.count,0),depth=1+Math.max(0,...args.map(a=>a.depth));
     // Ownership follows the value being changed; dependencies also include read-only inputs.
-    const owners=kind==='variable'?[extra.id]:kind==='deref'?ids:args[0]?.owners||[];
+    const owners=kind==='variable'?[extra.id]:['deref','compose'].includes(kind)?ids:args[0]?.owners||[];
     const common={key:++formulaSerial,bits,value:BigInt.asUintN(bits,value),ids,owners,step,calculated:['binary','unary','deref'].includes(kind)||args.some(a=>a.calculated)};
     if(count>FORMULA_NODES||depth>FORMULA_DEPTH){
       const refs=[...new Map(args.flatMap(leaves).map(n=>[n.id,n])).values()];
@@ -107,6 +107,7 @@
     if(node.kind==='summary')return '阶段值@'+node.step;
     if(node.kind==='deref'){const child=node.args[0];return '*'+(child.kind==='variable'?formatFormula(child,items):'('+formatFormula(child,items)+')');}
     if(node.kind==='cast')return (node.mode==='sign'?'符号扩展':'零扩展')+node.bits+'('+formatFormula(node.args[0],items)+')';
+    if(node.kind==='compose')return '拼接'+node.bits+'('+node.args.map((arg,i)=>'位['+node.offsets[i]*8+':'+(node.offsets[i]*8+arg.bits)+']='+ (arg.kind==='constant'?E.hex(arg.value,arg.bits/4):formatFormula(arg,items))).reverse().join('，')+')';
     if(node.kind==='slice')return (node.offset?'位['+node.offset*8+':'+(node.offset*8+node.bits)+']':'低'+node.bits+'位')+'('+formatFormula(node.args[0],items)+')';
     if(node.kind==='unary')return (node.op==='neg'?'−':'~')+'('+formatFormula(node.args[0],items)+')';
     const [symbol,precedence]=operator[node.op],text=formatFormula(node.args[0],items,precedence)+' '+symbol+' '+formatFormula(node.args[1],items,precedence+1);
@@ -117,7 +118,7 @@
     return !current?.available||current.location!==leaf.location||current.raw.split(' ').slice(leaf.offset,leaf.offset+leaf.size).join(' ')!==leaf.raw;
   });}
   function formulaInputs(node,items){
-    const reads=n=>[...(n.kind==='deref'?['['+E.hex(n.address)+'] = '+E.hex(n.value,n.bits/4)+'（'+n.bits+' 位读取）']:[]),...n.args.flatMap(reads)];
+    const reads=n=>[...(n.kind==='deref'?['['+E.hex(n.address)+'] = '+E.hex(n.value,n.bits/4)+'（'+n.bits+' 位读取）']:[]),...(n.partialRead?['部分字节参与 '+n.bits+' 位读取，其余位采用执行时的值']:[]),...n.args.flatMap(reads)];
     return [...new Set([...leaves(node).map(leaf=>formatFormula(leaf,items)+' = '+E.hex(leaf.value,leaf.bits/4)),...reads(node)])].join('，');
   }
   function overlap(a,b){return a.kind===b.kind&&a.name===b.name&&a.start<b.start+BigInt(b.size)&&b.start<a.start+BigInt(a.size);}
@@ -151,6 +152,28 @@
     const copy={at,offset:0,originSize:item.def.size,raw:item.current.raw,location:item.current.location,extension:''};
     copy.formula=leafFormula(item,copy);return copy;
   }
+  // Rebuild a wider operand from named byte ranges plus the remaining observed bits.
+  // A 4-byte watch must never silently stand for a whole 8-byte pointer.
+  function partialOperandFormula(operand,bits,candidates,step){
+    if(operand.at.size*8!==bits)return null;
+    const bytes=Array(operand.at.size).fill(null);
+    for(const c of candidates){
+      if(!c.formula||!overlap(c.at,operand.at))continue;
+      const copy=copyThrough(c,{from:operand.at,to:operand.at,extension:''});if(!copy)continue;
+      const offset=Number(copy.at.start-operand.at.start),node=copy.formula;
+      if(node.value!==BigInt.asUintN(node.bits,operand.value>>BigInt(offset*8)))continue;
+      for(let i=0;i<copy.at.size;i++)if(!bytes[offset+i])bytes[offset+i]={node,offset:i};
+    }
+    if(!bytes.some(Boolean))return null;
+    const args=[],offsets=[];
+    for(let start=0;start<bytes.length;){
+      const part=bytes[start];let end=start+1;
+      while(end<bytes.length&&(part?bytes[end]?.node===part.node&&bytes[end].offset===part.offset+end-start:!bytes[end]))end++;
+      offsets.push(start);args.push(part?sliceFormula(part.node,part.offset,end-start):formulaNode('constant',(end-start)*8,operand.value>>BigInt(start*8)));start=end;
+    }
+    if(args.length===2&&offsets[0]===0&&args[0].ids.length&&args[1].kind==='constant'&&args[1].value===0n)return {...extendFormula(args[0],bits,'zero'),partialRead:true};
+    return formulaNode('compose',bits,operand.value,args,{offsets,partialRead:true},step);
+  }
   function operandFormula(operand,bits,items,step=0){
     const constant=()=>formulaNode('constant',bits,operand.value);
     if(!operand.at)return constant();
@@ -167,7 +190,7 @@
       }
       if(node.value===BigInt.asUintN(bits,operand.value))return node;
     }
-    return constant();
+    return partialOperandFormula(operand,bits,candidates,step)||constant();
   }
   function dereferenceFormula(at,value,items,step=0){
     if(at.kind!=='mem'||!at.pointer||value===undefined)return null;
