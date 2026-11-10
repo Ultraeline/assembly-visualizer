@@ -80,7 +80,9 @@
     step=step||Math.max(0,...args.map(a=>a.step||0));
     const ids=[...new Set(kind==='variable'?[extra.id]:args.flatMap(n=>n.ids))];
     const count=1+args.reduce((n,a)=>n+a.count,0),depth=1+Math.max(0,...args.map(a=>a.depth));
-    const common={key:++formulaSerial,bits,value:BigInt.asUintN(bits,value),ids,step,calculated:['binary','unary','deref'].includes(kind)||args.some(a=>a.calculated)};
+    // Ownership follows the value being changed; dependencies also include read-only inputs.
+    const owners=kind==='variable'?[extra.id]:kind==='deref'?ids:args[0]?.owners||[];
+    const common={key:++formulaSerial,bits,value:BigInt.asUintN(bits,value),ids,owners,step,calculated:['binary','unary','deref'].includes(kind)||args.some(a=>a.calculated)};
     if(count>FORMULA_NODES||depth>FORMULA_DEPTH){
       const refs=[...new Map(args.flatMap(leaves).map(n=>[n.id,n])).values()];
       return {...common,kind:'summary',args:[],refs,step,count:1,depth:1,calculated:true};
@@ -89,18 +91,18 @@
   }
   function leafFormula(item,c){
     const raw=c.raw.split(' ').slice(c.offset,c.offset+c.originSize).join(' '),value=raw.split(' ').reduceRight((v,b)=>(v<<8n)|BigInt(parseInt(b,16)),0n);
-    return formulaNode('variable',c.originSize*8,value,[],{id:item.def.id,offset:c.offset,size:c.originSize,totalSize:item.def.size,raw,location:c.location});
+    return formulaNode('variable',c.originSize*8,value,[],{id:item.def.id,name:item.def.name,offset:c.offset,size:c.originSize,totalSize:item.def.size,raw,location:c.location});
   }
   function sliceFormula(node,offset,size){
     if(!offset&&size*8===node.bits)return node;
     const value=node.value>>BigInt(offset*8);
-    if(node.kind==='variable')return formulaNode('variable',size*8,value,[],{id:node.id,offset:node.offset+offset,size,totalSize:node.totalSize,raw:node.raw.split(' ').slice(offset,offset+size).join(' '),location:node.location});
+    if(node.kind==='variable')return formulaNode('variable',size*8,value,[],{id:node.id,name:node.name,offset:node.offset+offset,size,totalSize:node.totalSize,raw:node.raw.split(' ').slice(offset,offset+size).join(' '),location:node.location});
     return formulaNode('slice',size*8,value,[node],{offset});
   }
   function extendFormula(node,bits,mode){return formulaNode('cast',bits,mode==='sign'?BigInt.asIntN(node.bits,node.value):node.value,[node],{mode});}
   const operator={add:['+',4],sub:['−',4],imul:['×',5],and:['&',3],xor:['^',2],or:['|',1]};
   function formatFormula(node,items,parent=0){
-    if(node.kind==='variable'){const name=items.find(i=>i.def.id===node.id)?.def.name||'已移除变量';return name+(node.offset===0&&node.size===node.totalSize?'':'['+node.offset+':'+(node.offset+node.size)+']');}
+    if(node.kind==='variable'){const name=items.find(i=>i.def.id===node.id)?.def.name||node.name||'已移除变量';return name+(node.offset===0&&node.size===node.totalSize?'':'['+node.offset+':'+(node.offset+node.size)+']');}
     if(node.kind==='constant'){const value=BigInt.asIntN(node.bits,node.value).toString();return value.startsWith('-')&&parent?'('+value+')':value;}
     if(node.kind==='summary')return '阶段值@'+node.step;
     if(node.kind==='deref'){const child=node.args[0];return '*'+(child.kind==='variable'?formatFormula(child,items):'('+formatFormula(child,items)+')');}
@@ -193,7 +195,9 @@
     return (event?.calculations||[]).map(calc=>{
       const args=calc.operands.map(operand=>operandFormula(operand,calc.bits,items,step));
       const formula=formulaNode(args.length===1?'unary':'binary',calc.bits,calc.result,args,{op:calc.op},step);
-      return {at:calc.to,formula,offset:0,originSize:calc.bits/8,raw:'',location:'',extension:'',zeroUpper:calc.to.kind==='reg'&&calc.to.size===4};
+      const inPlace=calc.to.kind==='reg'&&calc.operands[0].at&&locationKey(calc.to)===locationKey(calc.operands[0].at);
+      const operation=inPlace?{op:calc.op,at:calc.to,bits:calc.bits,before:args[0],source:args[1]||null,after:formula,owners:args[0].owners,ids:formula.ids}:null;
+      return {at:calc.to,formula,operation,offset:0,originSize:calc.bits/8,raw:'',location:'',extension:'',zeroUpper:calc.to.kind==='reg'&&calc.to.size===4};
     }).filter(c=>c.formula.ids.length);
   }
   function advanceCopies(item,event,machine,calculations){
@@ -218,13 +222,16 @@
         if(added.has(key))continue;added.add(key);next.push(copy);
       }
     }
-    for(const calculation of calculations.filter(c=>c.formula.ids.includes(item.def.id))){next=next.filter(c=>!overlap(c.at,calculation.at));next.push(calculation);}
+    for(const calculation of calculations.filter(c=>c.formula.ids.includes(item.def.id))){const {operation,...copy}=calculation;next=next.filter(c=>!overlap(c.at,copy.at));next.push(copy);}
     next=[...new Map(next.map(c=>[copyKey(c),c])).values()].slice(-COPY_LIMIT);
     return next.length===before.length&&next.every((c,i)=>copyKey(c)===copyKey(before[i]))?before:next;
   }
+  function registerName(at){
+    const r=Object.entries(E.regs).find(([,r])=>r.name===at.name&&BigInt(r.shift/8)===at.start&&r.bits/8===at.size);
+    return r?r[0].toUpperCase():at.name.toUpperCase()+'['+Number(at.start)*8+':'+(Number(at.start)+at.size)*8+']';
+  }
   function registerView(item,c,registers,items){
-    const at=c.at,r=Object.entries(E.regs).find(([,r])=>r.name===at.name&&BigInt(r.shift/8)===at.start&&r.bits/8===at.size);
-    const register=r?r[0].toUpperCase():at.name.toUpperCase()+'['+Number(at.start)*8+':'+(Number(at.start)+at.size)*8+']';
+    const at=c.at,register=registerName(at);
     const calculated=!!c.formula?.calculated,label=calculated?formatFormula(c.formula,items):item.def.name+(c.offset===0&&c.originSize===item.def.size?'':'['+c.offset+':'+(c.offset+c.originSize)+']');
     const slice=raw=>raw.split(' ').slice(c.offset,c.offset+c.originSize).join(' ');
     const value=E.hex(BigInt.asUintN(at.size*8,registers[at.name]>>(at.start*8n)),at.size*2);
@@ -265,10 +272,21 @@
     }
     forget(id){
       const keep=c=>!c.formula?.ids.includes(id);
-      for(const item of this.items){item.copies=item.copies.filter(keep);item.copyHistory=item.copyHistory.map(h=>({...h,copies:h.copies.filter(keep)}));}
+      for(const item of this.items){item.copies=item.copies.filter(keep);item.copyHistory=item.copyHistory.map(h=>({...h,copies:h.copies.filter(keep)}));for(const r of item.records)r.operations=(r.operations||[]).filter(op=>!op.ids.includes(id));}
     }
     remove(id){this.forget(id);this.items=this.items.filter(x=>x.def.id!==id);}
     definitions(){return this.items.map(x=>({...x.def}));}
+    formatOperation(operation,format='hex'){
+      const {op,bits,before,source,after}=operation,target=registerName(operation.at),label=source?formatFormula(source,this.items):'';
+      const actions={add:'中加了 ',sub:'中减去了 ',imul:'中的值乘以 ',and:'中的值按位与 ',or:'中的值按位或 ',xor:'中的值按位异或 ',neg:'中的值取负',not:'中的值按位取反'};
+      const display=node=>format==='signed'?BigInt.asIntN(bits,node.value).toString():format==='unsigned'?BigInt.asUintN(bits,node.value).toString():E.hex(node.value,bits/4);
+      return {summary:target+' '+actions[op]+label,target,bits,before:display(before),after:display(after),beforeExpression:formatFormula(before,this.items),afterExpression:formatFormula(after,this.items)};
+    }
+    latestOperation(id){
+      const item=this.items.find(i=>i.def.id===id);if(!item)return null;
+      const record=[...item.records].reverse().find(r=>r.operations?.length);
+      return record?{step:record.step,...this.formatOperation(record.operations.at(-1),item.def.format)}:null;
+    }
     registerCopies(id){
       const result=this.items.filter(item=>!id||item.def.id===id).flatMap(item=>{
         const copies=registerViews(item,this.machine.regs,this.items),at=bindingLocation(item);
@@ -295,8 +313,9 @@
       }
       for(const {item,before,next,copyBefore} of updates){
         const copyAfter=registerViews(item,m.regs,this.items);
-        if(next.key!==before.key||viewKey(copyBefore)!==viewKey(copyAfter)){
-          item.records.push({step:m.steps,instruction:m.lastEvent?.instruction||'',address:m.lastEvent?.address===undefined?'':E.hex(m.lastEvent.address),before,after:next,copyBefore,copyAfter});
+        const operations=calculations.flatMap(c=>c.operation?.owners.includes(item.def.id)?[c.operation]:[]);
+        if(next.key!==before.key||viewKey(copyBefore)!==viewKey(copyAfter)||operations.length){
+          item.records.push({step:m.steps,instruction:m.lastEvent?.instruction||'',address:m.lastEvent?.address===undefined?'':E.hex(m.lastEvent.address),before,after:next,copyBefore,copyAfter,operations});
           if(item.records.length>LIMIT)item.records.shift();
         }
       }
